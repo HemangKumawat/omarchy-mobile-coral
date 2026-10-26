@@ -1,0 +1,214 @@
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+index fd213ff4efc1..024e76544d78 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+@@ -269,3 +269,5 @@ &spmi_bus {
+ 	/delete-property/ interrupts;
+ 	interrupts-extended = <&pdc 1 IRQ_TYPE_LEVEL_HIGH>;
+ };
++
++#include "sm8150-google-coral-audio.dtsi"
+diff --git a/drivers/spi/spidev.c b/drivers/spi/spidev.c
+index 5300c942a2a4..a73471973bb4 100644
+--- a/drivers/spi/spidev.c
++++ b/drivers/spi/spidev.c
+@@ -708,6 +708,7 @@ static const struct spi_device_id spidev_spi_ids[] = {
+ 	{ .name = /* dh */ "dhcom-board" },
+ 	{ .name = /* elgin */ "jg10309-01" },
+ 	{ .name = /* gocontroll */ "moduline-module-slot"},
++	{ .name = /* knowles */ "iaxxx-spi" },
+ 	{ .name = /* lineartechnology */ "ltc2488" },
+ 	{ .name = /* lwn */ "bk4" },
+ 	{ .name = /* lwn */ "bk4-spi" },
+@@ -741,6 +742,7 @@ static const struct of_device_id spidev_dt_ids[] = {
+ 	{ .compatible = "dh,dhcom-board", .data = &spidev_of_check },
+ 	{ .compatible = "elgin,jg10309-01", .data = &spidev_of_check },
+ 	{ .compatible = "gocontroll,moduline-module-slot", .data = &spidev_of_check},
++	{ .compatible = "knowles,iaxxx-spi", .data = &spidev_of_check },
+ 	{ .compatible = "lineartechnology,ltc2488", .data = &spidev_of_check },
+ 	{ .compatible = "lwn,bk4", .data = &spidev_of_check },
+ 	{ .compatible = "lwn,bk4-spi", .data = &spidev_of_check },
+diff --git a/sound/soc/codecs/cs35l36.c b/sound/soc/codecs/cs35l36.c
+index b60697ff7a50..8c8de7bc9691 100644
+--- a/sound/soc/codecs/cs35l36.c
++++ b/sound/soc/codecs/cs35l36.c
+@@ -1257,7 +1257,8 @@ static int cs35l36_component_probe(struct snd_soc_component *component)
+ 				   1 << CS35L36_BST_CTRL_LIM_SHIFT);
+ 		regmap_update_bits(cs35l36->regmap, CS35L36_BSTCVRT_VCTRL1,
+ 				   CS35L35_BSTCVRT_CTL_MASK,
+-				   CS35L36_BST_CTRL_10V_CLAMP);
++				   min_not_zero(cs35l36->pdata.bst_vctl,
++						CS35L36_BST_CTRL_10V_CLAMP));
+ 		regmap_write(cs35l36->regmap, CS35L36_TESTKEY_CTRL,
+ 			     CS35L36_TEST_LOCK1);
+ 		regmap_write(cs35l36->regmap, CS35L36_TESTKEY_CTRL,
+@@ -1454,7 +1455,7 @@ static int cs35l36_handle_of_data(struct i2c_client *i2c_client,
+ 			return -EINVAL;
+ 		}
+ 
+-		pdata->bst_ipk = (val - 1600) / 50;
++		pdata->bst_ipk = ((val - 1600) / 50) | CS35L36_VALID_PDATA;
+ 	} else {
+ 		dev_err(&i2c_client->dev,
+ 			"Unable to find required parameter 'cirrus,boost-peak-milliamp'");
+diff --git a/sound/soc/qcom/qdsp6/q6afe-dai.c b/sound/soc/qcom/qdsp6/q6afe-dai.c
+index 0f47aadaabe1..02d12e327ecc 100644
+--- a/sound/soc/qcom/qdsp6/q6afe-dai.c
++++ b/sound/soc/qcom/qdsp6/q6afe-dai.c
+@@ -6,6 +6,7 @@
+ #include <linux/err.h>
+ #include <linux/init.h>
+ #include <linux/module.h>
++#include <linux/of.h>
+ #include <linux/device.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+@@ -278,6 +279,9 @@ static int q6tdm_hw_params(struct snd_pcm_substream *substream,
+ 	tdm->data_align_type = dai_data->priv[dai->id].data_align;
+ 	tdm->sync_src = dai_data->priv[dai->id].sync_src;
+ 	tdm->sync_mode = dai_data->priv[dai->id].sync_mode;
++	tdm->data_out_enable = dai_data->priv[dai->id].data_out_enable;
++	tdm->invert_sync = dai_data->priv[dai->id].invert_sync;
++	tdm->data_delay = dai_data->priv[dai->id].data_delay;
+ 
+ 	return 0;
+ }
+@@ -489,6 +493,7 @@ static int q6afe_mi2s_set_sysclk(struct snd_soc_dai *dai,
+ {
+ 	struct q6afe_dai_data *dai_data = dev_get_drvdata(dai->dev);
+ 	struct q6afe_port *port = dai_data->port[dai->id];
++	int tdm_clk_attr = Q6AFE_LPASS_CLK_ATTRIBUTE_INVERT_COUPLE_NO;
+ 
+ 	switch (clk_id) {
+ 	case LPAIF_DIG_CLK:
+@@ -507,8 +512,11 @@ static int q6afe_mi2s_set_sysclk(struct snd_soc_dai *dai,
+ 					     Q6AFE_LPASS_CLK_ROOT_DEFAULT,
+ 					     freq, dir);
+ 	case Q6AFE_LPASS_CLK_ID_PRI_TDM_IBIT ... Q6AFE_LPASS_CLK_ID_QUIN_TDM_EBIT:
+-		return q6afe_port_set_sysclk(port, clk_id,
+-					     Q6AFE_LPASS_CLK_ATTRIBUTE_INVERT_COUPLE_NO,
++		/* Coral IA8508 transmits on the rising edge with a non-inverted BCLK. */
++		if (of_machine_is_compatible("google,coral") &&
++		    dai->id == QUATERNARY_TDM_TX_0)
++			tdm_clk_attr = Q6AFE_LPASS_CLK_ATTRIBUTE_COUPLE_NO;
++		return q6afe_port_set_sysclk(port, clk_id, tdm_clk_attr,
+ 					     Q6AFE_LPASS_CLK_ROOT_DEFAULT,
+ 					     freq, dir);
+ 	}
+diff --git a/sound/soc/qcom/qdsp6/q6afe.c b/sound/soc/qcom/qdsp6/q6afe.c
+index 7b59d514b432..a835f19ed337 100644
+--- a/sound/soc/qcom/qdsp6/q6afe.c
++++ b/sound/soc/qcom/qdsp6/q6afe.c
+@@ -1365,6 +1365,9 @@ void q6afe_tdm_port_prepare(struct q6afe_port *port,
+ 	pcfg->tdm_cfg.data_format = cfg->data_format;
+ 	pcfg->tdm_cfg.sync_mode = cfg->sync_mode;
+ 	pcfg->tdm_cfg.sync_src = cfg->sync_src;
++	pcfg->tdm_cfg.ctrl_data_out_enable = cfg->data_out_enable;
++	pcfg->tdm_cfg.ctrl_invert_sync_pulse = cfg->invert_sync;
++	pcfg->tdm_cfg.ctrl_sync_data_delay = cfg->data_delay;
+ 	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame;
+ 
+ 	pcfg->tdm_cfg.slot_width = cfg->slot_width;
+diff --git a/sound/soc/qcom/qdsp6/q6afe.h b/sound/soc/qcom/qdsp6/q6afe.h
+index a29abe4ce436..e41f2594c2cb 100644
+--- a/sound/soc/qcom/qdsp6/q6afe.h
++++ b/sound/soc/qcom/qdsp6/q6afe.h
+@@ -188,6 +188,9 @@ struct q6afe_tdm_cfg {
+ 	u16	data_format;
+ 	u16	sync_mode;
+ 	u16	sync_src;
++	u16	data_out_enable;
++	u16	invert_sync;
++	u16	data_delay;
+ 	u16	nslots_per_frame;
+ 	u16	slot_width;
+ 	u16	slot_mask;
+diff --git a/sound/soc/qcom/qdsp6/q6routing.c b/sound/soc/qcom/qdsp6/q6routing.c
+index f49243daa517..3c5f6e22c4d2 100644
+--- a/sound/soc/qcom/qdsp6/q6routing.c
++++ b/sound/soc/qcom/qdsp6/q6routing.c
+@@ -1085,8 +1085,12 @@ static int routing_hw_params(struct snd_soc_component *component,
+ 	case SNDRV_PCM_FORMAT_S24_LE:
+ 			session->bits_per_sample = 24;
+ 		break;
+-	default:
++	case SNDRV_PCM_FORMAT_S32_LE:
++		session->bits_per_sample = 32;
+ 		break;
++	default:
++		mutex_unlock(&data->lock);
++		return -EINVAL;
+ 	}
+ 
+ 	mutex_unlock(&data->lock);
+diff --git a/sound/soc/qcom/sm8150.c b/sound/soc/qcom/sm8150.c
+index 8ad61345bb73..f127515e8aae 100644
+--- a/sound/soc/qcom/sm8150.c
++++ b/sound/soc/qcom/sm8150.c
+@@ -33,6 +33,8 @@ struct sm8150_snd_data {
+ 	struct sdw_stream_runtime *sruntime[AFE_PORT_MAX];
+ };
+ 
++#include "sm8150-coral.h"
++
+ static unsigned int tdm_slot_offset[8] = {0, 4, 8, 12, 16, 20, 24, 28};
+ 
+ static const struct {
+@@ -53,6 +55,8 @@ static int sm8150_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
+ 					SNDRV_PCM_HW_PARAM_CHANNELS);
+ 	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
+ 
++	if (sm8150_coral_port(rtd->card, snd_soc_rtd_to_cpu(rtd, 0)->id))
++		return sm8150_coral_fixup(rtd, params);
+ 	rate->min = rate->max = 48000;
+ 	channels->min = channels->max = 2;
+ 	snd_mask_none(fmt);
+@@ -199,6 +203,8 @@ static int sm8150_snd_hw_params(struct snd_pcm_substream *substream,
+ 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+ 	int ret = 0;
+ 
++	if (sm8150_coral_port(rtd->card, cpu_dai->id))
++		return sm8150_coral_hw_params(substream, params);
+ 	switch (cpu_dai->id) {
+ 	case QUATERNARY_TDM_RX_0:
+ 	case QUATERNARY_TDM_TX_0:
+@@ -305,6 +311,8 @@ static int sm8150_snd_startup(struct snd_pcm_substream *substream)
+ 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+ 	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+ 
++	if (sm8150_coral_port(card, cpu_dai->id))
++		return sm8150_coral_startup(substream);
+ 	switch (cpu_dai->id) {
+ 	case QUATERNARY_TDM_RX_0:
+ 		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_DSP_A;
+@@ -332,6 +340,10 @@ static void sm8150_snd_shutdown(struct snd_pcm_substream *substream)
+ 	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(card);
+ 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+ 
++	if (sm8150_coral_port(card, cpu_dai->id)) {
++		sm8150_coral_shutdown(substream);
++		return;
++	}
+ 	switch (cpu_dai->id) {
+ 	case QUATERNARY_TDM_RX_0:
+ 	case QUATERNARY_TDM_TX_0:
+@@ -419,6 +431,11 @@ static void sm8150_add_be_ops(struct snd_soc_card *card)
+ 	int i;
+ 
+ 	for_each_card_prelinks(card, i, link) {
++		if (sm8150_is_coral(card) && link->id == QUATERNARY_TDM_TX_0) {
++			link->no_pcm = 1;
++			link->dynamic = 0;
++			link->capture_only = 1;
++		}
+ 		if (link->no_pcm == 1) {
+ 			link->be_hw_params_fixup = sm8150_be_hw_params_fixup;
+ 			link->ops = &sm8150_be_ops;
+@@ -443,6 +460,7 @@ static int sm8150_platform_probe(struct platform_device *pdev)
+ 	if (!data)
+ 		return -ENOMEM;
+ 
++	card->late_probe = sm8150_coral_late_probe;
+ 	card->driver_name = DRIVER_NAME;
+ 	card->dev = dev;
+ 	card->owner = THIS_MODULE;

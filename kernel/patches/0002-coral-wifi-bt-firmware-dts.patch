@@ -1,0 +1,47 @@
+From 1cad56fbcbbad2d2078b9da2c87c84fd46c94811 Mon Sep 17 00:00:00 2001
+From: Hemang Kumawat <HemangKumawat@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 01:24:16 +0200
+Subject: [PATCH] arm64: dts: coral: Wi-Fi board calibration and Bluetooth
+ firmware from stock vendor
+
+ath10k: firmware-name=coral (board-2.bin subdir) + calibration-variant Google_coral.
+btqca: vendor crnv21.bin + crbtfw21.tlv (only BT pair stock ships -> ROM 0x21).
+IPA left out: sm8150 is IPA v4.1 (stock qcom,ipa-hw-ver=15), no driver data.
+---
+ .../boot/dts/qcom/sm8150-google-coral.dts     | 23 +++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+index 735eca800dea..ddbef9dcb5a1 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+@@ -90,3 +90,26 @@ &remoteproc_slpi {
+ 	firmware-name = "qcom/sm8150/google/coral/slpi.mdt";
+ };
+ 
++
++/*
++ * Radios (coral-radio). Stock vendor.img ships exactly one WCN3990 BT pair
++ * (crbtfw21.tlv + crnv21.bin, i.e. ROM 0x21) and bdwlan-coral.bin (26328 B =
++ * WCN3990_BOARD_DATA_SZ). linux-firmware has no Google_coral board entry, so
++ * without these the chip falls back to the generic "qmi-board-id=ff" data.
++ */
++&wifi {
++	/* ath10k snoc: firmware-name is a subdir -> ath10k/WCN3990/hw1.0/coral/board-2.bin */
++	firmware-name = "coral";
++	qcom,calibration-variant = "Google_coral";
++};
++
++&bluetooth {
++	/* btqca: "qca/" + name; vendor NVM and its matching rampatch */
++	firmware-name = "coral/crnv21.bin", "coral/crbtfw21.tlv";
++};
++
++/*
++ * No &ipa (mobile data): sm8150 is IPA v4.1 and drivers/net/ipa has no v4.1
++ * data or compatible, and sm8150.dtsi has no ipa node. Porting that is driver
++ * work (ref OnePlus 7 Pro / raphael downstream ports), not a dts line.
++ */
+-- 
+2.56.0
+

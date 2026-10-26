@@ -1,0 +1,115 @@
+--- a/drivers/media/platform/qcom/camss/camss-vfe-17x.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe-17x.c
+@@ -204,9 +204,60 @@
+ 	writel_relaxed(reset_bits, vfe->base + VFE_GLOBAL_RESET_CMD);
+ }
+ 
++/*
++ * SM8150 CAMNOC quality-of-service.
++ *
++ * The vendor stack programs per-port priority, danger and safe tables at CPAS
++ * start; mainline models no CPAS and writes none of them. Read on hardware,
++ * every IFE entry is zero, and the write master completes transfers without
++ * issuing a single memory write. These are the values the vendor writes for
++ * this SoC revision, from cpastop_v175_101.h.
++ */
++#define CAMNOC_BASE			0x0ac42000
++#define CAMNOC_SIZE			0x5000
++
++static const struct {
++	u32 offset;
++	u32 value;
++} camnoc_qos_8150[] = {
++	{ 0x0430, 0x66666543 },	/* IFE02 priority LUT low */
++	{ 0x0434, 0x66666666 },	/* IFE02 priority LUT high */
++	{ 0x0440, 0xffffff00 },	/* IFE02 danger LUT low */
++	{ 0x0448, 0x00000001 },	/* IFE02 safe LUT low */
++	{ 0x0830, 0x66666543 },	/* IFE13 priority LUT low */
++	{ 0x0834, 0x66666666 },	/* IFE13 priority LUT high */
++	{ 0x0840, 0xffffff00 },	/* IFE13 danger LUT low */
++	{ 0x0848, 0x00000001 },	/* IFE13 safe LUT low */
++};
++
++static void vfe_camnoc_qos_init(struct vfe_device *vfe)
++{
++	void __iomem *camnoc;
++	unsigned int i;
++
++	camnoc = ioremap(CAMNOC_BASE, CAMNOC_SIZE);
++	if (!camnoc) {
++		dev_warn(vfe->camss->dev, "cannot map CAMNOC\n");
++		return;
++	}
++
++	for (i = 0; i < ARRAY_SIZE(camnoc_qos_8150); i++)
++		writel_relaxed(camnoc_qos_8150[i].value,
++			       camnoc + camnoc_qos_8150[i].offset);
++
++	/* Ordering against the write master configuration that follows. */
++	wmb();
++	iounmap(camnoc);
++
++	dev_info(vfe->camss->dev, "CAMNOC quality-of-service programmed\n");
++}
++
+ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
+ {
+ 	u32 val;
++
++	if (vfe->camss->res->version == CAMSS_8150)
++		vfe_camnoc_qos_init(vfe);
+ 
+ 	/*Set Debug Registers*/
+ 	val = DEBUG_STATUS_CFG_STATUS0(1) |
+@@ -220,6 +271,7 @@
+ 	val = WM_CGC_OVERRIDE_ALL;
+ 	writel_relaxed(val, vfe->base + VFE_BUS_WM_CGC_OVERRIDE);
+ 
++
+ 	writel_relaxed(0x0, vfe->base + VFE_BUS_WM_TEST_BUS_CTRL);
+ 
+ 	/* if addr_no_sync has default value then config the addr no sync reg */
+@@ -259,6 +311,18 @@
+ 	struct v4l2_pix_format_mplane *pix =
+ 		&line->video_out.active_fmt.fmt.pix_mp;
+ 	u32 stride = pix->plane_fmt[0].bytesperline;
++
++	/* Bring-up instrumentation: report what is actually programmed. */
++	{
++		static int reported;
++
++		if (reported < 6) {
++			reported++;
++			dev_info(vfe->camss->dev,
++				 "vfe%d wm%u: addr=%08x stride=%u height=%u\n",
++				 vfe->id, wm, addr, stride, pix->height);
++		}
++	}
+ 
+ 	writel_relaxed(addr, vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm));
+ 	writel_relaxed(stride * pix->height, vfe->base + VFE_BUS_WM_FRAME_INC(wm));
+@@ -347,6 +411,24 @@
+ 
+ 	writel_relaxed(CMD_GLOBAL_CLEAR, vfe->base + VFE_IRQ_CMD);
+ 	writel_relaxed(1, vfe->base + VFE_BUS_IRQ_CLEAR_GLOBAL);
++
++	/*
++	 * Bring-up instrumentation. Reset acknowledgements dominate and say
++	 * nothing, so only interrupts carrying something else are printed.
++	 */
++	if ((status0 & ~STATUS_0_RESET_ACK) || status1 ||
++	    vfe_bus_status[VFE_LINE_RDI0] || vfe_bus_status[VFE_LINE_RDI1]) {
++		static int reported;
++
++		if (reported < 24) {
++			reported++;
++			dev_info(vfe->camss->dev,
++				 "vfe%d irq: status0=%08x status1=%08x bus_rdi0=%08x bus_rdi1=%08x\n",
++				 vfe->id, status0, status1,
++				 vfe_bus_status[VFE_LINE_RDI0],
++				 vfe_bus_status[VFE_LINE_RDI1]);
++		}
++	}
+ 
+ 	if (status0 & STATUS_0_RESET_ACK)
+ 		vfe->isr_ops.reset_ack(vfe);

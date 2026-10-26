@@ -1,0 +1,353 @@
+diff -rN -U1 a/hexagonrpcd/apps_std.c b/hexagonrpcd/apps_std.c
+--- a/hexagonrpcd/apps_std.c	2026-10-19 05:39:30.217962415 +0000
++++ b/hexagonrpcd/apps_std.c	2026-10-19 05:52:38.261788424 +0000
+@@ -160,2 +160,24 @@
+ 
++static uint32_t apps_std_frename(void *data,
++				 const struct fastrpc_io_buffer *inbufs,
++				 struct fastrpc_io_buffer *outbufs)
++{
++	struct apps_std_ctx *ctx = data;
++	const char *oldname = inbufs[1].p, *newname = inbufs[2].p;
++	int ret;
++	for (size_t i = 1; i <= 2; i++)
++		if (!inbufs[i].s || !inbufs[i].p || !((const char *)inbufs[i].p)[0]
++		 || ((const char *)inbufs[i].p)[inbufs[i].s - 1])
++			return AEE_EBADPARM;
++#ifdef HEXAGONRPC_VERBOSE
++	fprintf(stderr, "rename(%s, %s)\n", oldname, newname);
++#endif
++	ret = hexagonfs_rename(ctx->fds, ctx->rootfd, oldname, newname);
++	if (ret) {
++		fprintf(stderr, "Could not rename %s to %s: %s\n", oldname, newname, strerror(-ret));
++		return AEE_EFAILED;
++	}
++	return 0;
++}
++
+ static uint32_t apps_std_fseek(void *data,
+@@ -441,3 +463,4 @@
+ 
+-	for (i = 0; i < HEXAGONFS_MAX_FD; i++) {
++	/* Root/search descriptors were opened first and must outlive their children. */
++	for (i = HEXAGONFS_MAX_FD - 1; i >= 0; i--) {
+ 		if (ctx->fds[i] != NULL)
+@@ -510,2 +533,4 @@
+ 	},
++	{ .def = NULL, .impl = NULL, },
++	{ .def = &apps_std_frename_def, .impl = apps_std_frename, },
+ };
+@@ -514,3 +539,3 @@
+ 	.name = "apps_std",
+-	.n_procs = 32,
++	.n_procs = HRPC_ARRAY_SIZE(apps_std_procs),
+ 	.procs = apps_std_procs,
+diff -rN -U1 a/hexagonrpcd/hexagonfs.c b/hexagonrpcd/hexagonfs.c
+--- a/hexagonrpcd/hexagonfs.c	2026-10-19 05:38:25.686010386 +0000
++++ b/hexagonrpcd/hexagonfs.c	2026-10-19 05:49:37.615327906 +0000
+@@ -142,5 +142,6 @@
+ 
+-int hexagonfs_openat_flags(struct hexagonfs_fd **fds, int rootfd, int dirfd, const char *name, int flags)
++static int resolve_path(struct hexagonfs_fd *root, struct hexagonfs_fd *dir,
++			 const char *name, int flags, struct hexagonfs_fd **out)
+ {
+-	struct hexagonfs_fd *fd;
++	struct hexagonfs_fd *fd = dir;
+ 	const char *curr = name;
+@@ -148,3 +149,2 @@
+ 	bool expect_dir;
+-	int selected = dirfd;
+ 	int ret = 0;
+@@ -152,3 +152,3 @@
+ 	if (*curr == '/') {
+-		selected = rootfd;
++		fd = root;
+ 
+@@ -158,3 +158,2 @@
+ 
+-	fd = fds[selected];
+ 
+@@ -170,3 +169,3 @@
+ 		} else if (!strcmp(segment, "..")) {
+-			fd = pop_dir(fd, fds[rootfd]);
++			fd = pop_dir(fd, root);
+ 		} else {
+@@ -182,7 +181,4 @@
+ 
+-	ret = allocate_file_number(fds, fd);
+-	if (ret)
+-		goto err;
+-
+-	return ret;
++	*out = fd;
++	return 0;
+ 
+@@ -194,2 +190,14 @@
+ 
++int hexagonfs_openat_flags(struct hexagonfs_fd **fds, int rootfd, int dirfd, const char *name, int flags)
++{
++	struct hexagonfs_fd *fd;
++	int ret = resolve_path(fds[rootfd], fds[dirfd], name, flags, &fd);
++	if (ret)
++		return ret;
++	ret = allocate_file_number(fds, fd);
++	if (ret < 0)
++		destroy_file_descriptor(fd);
++	return ret;
++}
++
+ int hexagonfs_openat(struct hexagonfs_fd **fds, int rootfd, int dirfd, const char *name)
+@@ -222,2 +230,34 @@
+ 	return ret;
++}
++
++int hexagonfs_rename(struct hexagonfs_fd **fds, int rootfd, const char *oldname, const char *newname)
++{
++	struct hexagonfs_fd *source, *dest = NULL;
++	const char *oldbase = strrchr(oldname, '/'), *newbase = strrchr(newname, '/');
++	char *parent;
++	int ret;
++	oldbase = oldbase ? oldbase + 1 : oldname;
++	newbase = newbase ? newbase + 1 : newname;
++	if (!*oldbase || !*newbase || !strcmp(oldbase, ".") || !strcmp(oldbase, "..")
++	 || !strcmp(newbase, ".") || !strcmp(newbase, ".."))
++		return -EINVAL;
++	ret = resolve_path(fds[rootfd], fds[rootfd], oldname, O_NONBLOCK, &source);
++	if (ret)
++		return ret;
++	ret = -EROFS;
++	if (!source->ops->rename)
++		goto out;
++	parent = newbase == newname ? strdup(".") : strndup(newname, newbase - newname);
++	if (!parent) {
++		ret = -ENOMEM;
++		goto out;
++	}
++	ret = resolve_path(fds[rootfd], fds[rootfd], parent, O_RDONLY, &dest);
++	free(parent);
++	if (!ret)
++		ret = source->ops->rename(source, oldbase, dest, newbase);
++out:
++	destroy_file_descriptor(dest);
++	destroy_file_descriptor(source);
++	return ret;
+ }
+diff -rN -U1 a/hexagonrpcd/hexagonfs.h b/hexagonrpcd/hexagonfs.h
+--- a/hexagonrpcd/hexagonfs.h	2026-10-19 05:38:25.685010356 +0000
++++ b/hexagonrpcd/hexagonfs.h	2026-10-19 05:49:16.020675120 +0000
+@@ -44,2 +44,4 @@
+ 	int (*remove)(struct hexagonfs_fd *fd, const char *name);
++	int (*rename)(struct hexagonfs_fd *source, const char *oldname,
++		      struct hexagonfs_fd *dest, const char *newname);
+ 	int (*stat)(struct hexagonfs_fd *fd, struct stat *stats);
+@@ -79,2 +81,3 @@
+ int hexagonfs_remove(struct hexagonfs_fd **fds, int rootfd, int dirfd, const char *name);
++int hexagonfs_rename(struct hexagonfs_fd **fds, int rootfd, const char *oldname, const char *newname);
+ int hexagonfs_close(struct hexagonfs_fd **fds, int fileno);
+diff -rN -U1 a/hexagonrpcd/hexagonfs_mapped.c b/hexagonrpcd/hexagonfs_mapped.c
+--- a/hexagonrpcd/hexagonfs_mapped.c	2026-10-19 05:40:24.471603371 +0000
++++ b/hexagonrpcd/hexagonfs_mapped.c	2026-10-19 05:49:37.615327906 +0000
+@@ -381,2 +381,34 @@
+ 
++static int registry_rename(struct hexagonfs_fd *source, const char *oldname,
++			    struct hexagonfs_fd *dest, const char *newname)
++{
++	struct mapped_ctx *src = source->data, *from, *to;
++	struct stat st;
++	int target, ret;
++	struct open_how how = {
++		.flags = O_NONBLOCK | O_NOFOLLOW,
++		.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV,
++	};
++	if (!source->up || source->up->ops != &hexagonfs_registry_ops
++	 || dest->ops != &hexagonfs_registry_ops)
++		return -EROFS;
++	if (fstat(src->fd, &st))
++		return -errno;
++	if (!S_ISREG(st.st_mode))
++		return -EINVAL;
++	from = source->up->data;
++	to = dest->data;
++	target = syscall(SYS_openat2, to->fd, newname, &how, sizeof(how));
++	if (target < 0 && errno != ENOENT)
++		return -errno;
++	if (target >= 0) {
++		ret = fstat(target, &st) ? -errno : (!S_ISREG(st.st_mode) ? -EINVAL : 0);
++		close(target);
++		if (ret)
++			return ret;
++	}
++	/* Both parents are held on tmpfs; renameat2 replaces a regular target atomically. */
++	return syscall(SYS_renameat2, from->fd, oldname, to->fd, newname, 0) < 0 ? -errno : 0;
++}
++
+ struct hexagonfs_file_ops hexagonfs_registry_ops = {
+@@ -388,2 +420,3 @@
+ 	.remove = registry_remove,
++	.rename = registry_rename,
+ 	.readdir = mapped_readdir,
+diff -rN -U1 a/hexagonrpcd/interface/apps_std.c b/hexagonrpcd/interface/apps_std.c
+--- a/hexagonrpcd/interface/apps_std.c	2026-10-19 05:38:25.686010386 +0000
++++ b/hexagonrpcd/interface/apps_std.c	2026-10-19 05:49:37.615327906 +0000
+@@ -128,2 +128,12 @@
+ 
++static struct hrpc_arg_def_interp4 apps_std_frename_args[] = {
++	{ HRPC_ARG_BLOB_SEQ, sizeof(char) },
++	{ HRPC_ARG_BLOB_SEQ, sizeof(char) },
++};
++const struct hrpc_method_def_interp4 apps_std_frename_def = {
++	.msg_id = 33,
++	.n_args = HRPC_ARRAY_SIZE(apps_std_frename_args),
++	.args = apps_std_frename_args,
++};
++
+ static struct hrpc_arg_def_interp4 apps_std_opendir_args[] = {
+diff -rN -U1 a/hexagonrpcd/interface/apps_std.h b/hexagonrpcd/interface/apps_std.h
+--- a/hexagonrpcd/interface/apps_std.h	2026-10-19 05:38:25.686010386 +0000
++++ b/hexagonrpcd/interface/apps_std.h	2026-10-19 05:49:16.021675150 +0000
+@@ -34,2 +34,3 @@
+ extern struct hrpc_method_def_interp4 apps_std_fremove_def;
++extern struct hrpc_method_def_interp4 apps_std_frename_def;
+ extern struct hrpc_method_def_interp4 apps_std_opendir_def;
+diff -rN -U1 a/tests/test_registry_rename.c b/tests/test_registry_rename.c
+--- a/tests/test_registry_rename.c	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/test_registry_rename.c	2026-10-19 05:51:23.089516195 +0000
+@@ -0,0 +1,138 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later */
++#include <assert.h>
++#include <fcntl.h>
++#include <stdarg.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++#include <misc/fastrpc.h>
++#include "../hexagonrpcd/listener.c"
++#include "../hexagonrpcd/apps_std.h"
++#include "../hexagonrpcd/rpcd_builder.h"
++
++static struct fastrpc_interface *interfaces[2];
++static char *root;
++static const char *src = "/mnt/vendor/persist/sensors/registry/temp.json";
++static const char *dst = "/persist/sensors/registry/registry/item";
++
++#ifdef __GLIBC__
++int ioctl(int fd, unsigned long op, ...)
++#else
++int ioctl(int fd, int op, ...)
++#endif
++{
++	va_list ap;
++	va_start(ap, op);
++	struct fastrpc_invoke *call = va_arg(ap, struct fastrpc_invoke *);
++	va_end(ap);
++	assert(op == FASTRPC_IOCTL_INVOKE && call->sc == 0x1f030000 && call->handle == 1);
++	struct fastrpc_invoke_args *args = (void *)(uintptr_t)call->args;
++	uint32_t *prim = (void *)(uintptr_t)args[0].ptr, result;
++	assert(args[0].length == 12 && prim[0] == 33);
++	assert(prim[1] == args[1].length && prim[2] == args[2].length);
++	struct fastrpc_io_buffer in[3], *out = NULL;
++	for (size_t i = 0; i < 3; i++)
++		in[i] = (struct fastrpc_io_buffer){args[i].length, (void *)(uintptr_t)args[i].ptr};
++	assert(invoke_requested_procedure(2, interfaces, 1, call->sc, &result, in, &out) == 0);
++	iobuf_free(0, out);
++	return result;
++}
++
++static int rpc_rename(const char *oldname, const char *newname)
++{
++	return hexagonrpc(interfaces[1]->procs[33].def, -1, 1,
++		(uint32_t)strlen(oldname) + 1, oldname, (uint32_t)strlen(newname) + 1, newname);
++}
++
++static void write_file(const char *name, const char *text)
++{
++	char path[256];
++	snprintf(path, sizeof(path), "%s/sensors/%s", root, name);
++	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
++	assert(fd >= 0 && write(fd, text, strlen(text)) == (ssize_t)strlen(text));
++	assert(close(fd) == 0);
++}
++
++static void check_file(const char *name, const char *text)
++{
++	char path[256], buf[32] = {0};
++	snprintf(path, sizeof(path), "%s/sensors/%s", root, name);
++	int fd = open(path, O_RDONLY);
++	assert(fd >= 0 && read(fd, buf, sizeof(buf)) == (ssize_t)strlen(text));
++	assert(!memcmp(buf, text, strlen(text)) && close(fd) == 0);
++}
++
++int main(int argc, char **argv)
++{
++	char tmp[] = "/dev/shm/coral-rename-XXXXXX", path[256];
++	root = mkdtemp(tmp);
++	assert(root);
++	const char *dirs[] = {"sensors", "sensors/registry", "sensors/config"};
++	for (size_t i = 0; i < 3; i++) {
++		snprintf(path, sizeof(path), "%s/%s", root, dirs[i]);
++		assert(mkdir(path, 0700) == 0);
++	}
++	write_file("temp.json", "new"); write_file("registry/item", "old");
++	write_file("config/readonly", "stock");
++	interfaces[1] = fastrpc_apps_std_init(construct_root_dir(root, "sdsp"));
++	assert(interfaces[1] && interfaces[1]->n_procs == 34);
++	snprintf(path, sizeof(path), "%s/sensors/registry/item", root);
++	int oldfd = open(path, O_RDONLY);
++	assert(oldfd >= 0 && rpc_rename(src, dst) == 0);
++	char old[3];
++	assert(read(oldfd, old, sizeof(old)) == 3 && !memcmp(old, "old", 3));
++	assert(close(oldfd) == 0);
++	check_file("registry/item", "new");
++	snprintf(path, sizeof(path), "%s/sensors/temp.json", root);
++	assert(access(path, F_OK) == -1 && errno == ENOENT);
++	assert(rpc_rename(dst, dst) == 0);
++	write_file("temp.json", "next");
++	assert(rpc_rename(src, "/persist/sensors/registry/registry/second") == 0);
++	check_file("registry/second", "next");
++	write_file("temp.json", "keep");
++	snprintf(path, sizeof(path), "%s/sensors/link", root);
++	assert(symlink("config/readonly", path) == 0);
++	snprintf(path, sizeof(path), "%s/sensors/escape", root);
++	assert(symlink("config", path) == 0);
++	const char *ro = "/vendor/etc/sensors/config/readonly";
++	const char *escape = "/persist/sensors/registry/../../../../vendor/etc/sensors/config/readonly";
++	const char *link = "/persist/sensors/registry/link";
++	const char *via = "/persist/sensors/registry/escape/readonly";
++	const char *bad[][2] = {
++		{ro,dst}, {src,ro}, {escape,dst}, {src,escape}, {link,dst}, {src,link},
++		{via,dst}, {src,via}, {"/persist/sensors/registry",dst},
++		{"/persist/sensors/registry/registry",dst}, {src,"/persist/sensors/registry"},
++		{src,"/persist/sensors/registry/registry"}, {src,"/"}, {src,"."},
++		{src,"../outside"}, {"/persist/sensors/registry/missing",dst},
++	};
++	for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++)
++		assert(rpc_rename(bad[i][0], bad[i][1]) == AEE_EFAILED);
++	check_file("temp.json", "keep"); check_file("registry/item", "new");
++	check_file("config/readonly", "stock");
++	struct fastrpc_io_buffer invalid[3] = {{0,NULL},{1,"x"},{0,NULL}};
++	assert(interfaces[1]->procs[33].impl(interfaces[1]->data, invalid, NULL) == AEE_EBADPARM);
++	assert(rpc_rename(src, dst) == 0);
++	check_file("registry/item", "keep");
++	fastrpc_apps_std_deinit(interfaces[1]);
++	const char *files[] = {"registry/item", "registry/second", "config/readonly", "link", "escape"};
++	for (size_t i = 0; i < 5; i++) {
++		snprintf(path, sizeof(path), "%s/sensors/%s", root, files[i]);
++		assert(unlink(path) == 0);
++	}
++	for (int i = 2; i >= 0; i--) {
++		snprintf(path, sizeof(path), "%s/%s", root, dirs[i]);
++		assert(rmdir(path) == 0);
++	}
++	assert(rmdir(root) == 0);
++	if (argc == 2) {
++		root = argv[1];
++		write_file("temp.json", "disk");
++		interfaces[1] = fastrpc_apps_std_init(construct_root_dir(root, "sdsp"));
++		assert(interfaces[1] && rpc_rename(src, dst) == AEE_EFAILED);
++		check_file("temp.json", "disk");
++		fastrpc_apps_std_deinit(interfaces[1]);
++		snprintf(path, sizeof(path), "%s/sensors/temp.json", root);
++		assert(unlink(path) == 0);
++	}
++	puts("extended rename RPC, atomic replacement and RAM/RO/traversal/symlink/directory guards passed");
++	return 0;
++}

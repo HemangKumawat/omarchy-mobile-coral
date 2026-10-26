@@ -1,0 +1,434 @@
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 0ee1ebf9c1e2..24a16218d66a 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -2062,236 +2062,232 @@ int msm_dsi_host_init(struct msm_dsi *msm_dsi)
+ 	ret = devm_request_irq(&pdev->dev, msm_host->irq, dsi_host_irq,
+ 			IRQF_TRIGGER_HIGH | IRQF_NO_AUTOEN,
+ 			"dsi_isr", msm_host);
+ 	if (ret < 0)
+ 		return dev_err_probe(&pdev->dev, ret, "failed to request IRQ%u\n",
+ 				     msm_host->irq);
+ 
+ 	init_completion(&msm_host->dma_comp);
+ 	init_completion(&msm_host->video_comp);
+ 	mutex_init(&msm_host->dev_mutex);
+ 	mutex_init(&msm_host->cmd_mutex);
+ 	spin_lock_init(&msm_host->intr_lock);
+ 
+ 	/* setup workqueue */
+ 	msm_host->workqueue = alloc_ordered_workqueue("dsi_drm_work", 0);
+ 	if (!msm_host->workqueue)
+ 		return -ENOMEM;
+ 
+ 	INIT_WORK(&msm_host->err_work, dsi_err_worker);
+ 
+ 	msm_dsi->id = msm_host->id;
+ 
+ 	DBG("Dsi Host %d initialized", msm_host->id);
+ 	return 0;
+ }
+ 
+ void msm_dsi_host_destroy(struct mipi_dsi_host *host)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
+ 	DBG("");
+ 	if (msm_host->workqueue) {
+ 		destroy_workqueue(msm_host->workqueue);
+ 		msm_host->workqueue = NULL;
+ 	}
+ 
+ 	mutex_destroy(&msm_host->cmd_mutex);
+ 	mutex_destroy(&msm_host->dev_mutex);
+ 
+ 	pm_runtime_disable(&msm_host->pdev->dev);
+ }
+ 
+ int msm_dsi_host_modeset_init(struct mipi_dsi_host *host,
+ 					struct drm_device *dev)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+ 	int ret;
+ 
+ 	msm_host->dev = dev;
+ 
+ 	ret = cfg_hnd->ops->tx_buf_alloc(msm_host, SZ_4K);
+ 	if (ret) {
+ 		pr_err("%s: alloc tx gem obj failed, %d\n", __func__, ret);
+ 		return ret;
+ 	}
+ 
+ 	return 0;
+ }
+ 
+ int msm_dsi_host_register(struct mipi_dsi_host *host)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 	int ret;
+ 
+ 	/* Register mipi dsi host */
+ 	if (!msm_host->registered) {
+ 		host->dev = &msm_host->pdev->dev;
+ 		host->ops = &dsi_host_ops;
+ 		ret = mipi_dsi_host_register(host);
+ 		if (ret)
+ 			return ret;
+ 
+ 		msm_host->registered = true;
+ 	}
+ 
+ 	return 0;
+ }
+ 
+ void msm_dsi_host_unregister(struct mipi_dsi_host *host)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
+ 	if (msm_host->registered) {
+ 		mipi_dsi_host_unregister(host);
+ 		host->dev = NULL;
+ 		host->ops = NULL;
+ 		msm_host->registered = false;
+ 	}
+ }
+ 
+ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
+ 				const struct mipi_dsi_msg *msg)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+-	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+ 
+ 	/* TODO: make sure dsi_cmd_mdp is idle.
+ 	 * Since DSI6G v1.2.0, we can set DSI_TRIG_CTRL.BLOCK_DMA_WITHIN_FRAME
+ 	 * to ask H/W to wait until cmd mdp is idle. S/W wait is not needed.
+ 	 * How to handle the old versions? Wait for mdp cmd done?
+ 	 */
+ 
+ 	/*
+ 	 * mdss interrupt is generated in mdp core clock domain
+ 	 * mdp clock need to be enabled to receive dsi interrupt
+ 	 */
+ 	pm_runtime_get_sync(&msm_host->pdev->dev);
+-	cfg_hnd->ops->link_clk_set_rate(msm_host);
+-	cfg_hnd->ops->link_clk_enable(msm_host);
++	/* power_on holds link clocks and the OPP vote until power_off. */
+ 
+ 	/* TODO: vote for bus bandwidth */
+ 
+ 	if (!(msg->flags & MIPI_DSI_MSG_USE_LPM))
+ 		dsi_set_tx_power_mode(0, msm_host);
+ 
+ 	msm_host->dma_cmd_ctrl_restore = dsi_read(msm_host, REG_DSI_CTRL);
+ 	dsi_write(msm_host, REG_DSI_CTRL,
+ 		msm_host->dma_cmd_ctrl_restore |
+ 		DSI_CTRL_CMD_MODE_EN |
+ 		DSI_CTRL_ENABLE);
+ 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_CMD_DMA_DONE, 1);
+ 
+ 	return 0;
+ }
+ 
+ void msm_dsi_host_xfer_restore(struct mipi_dsi_host *host,
+ 				const struct mipi_dsi_msg *msg)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+-	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+ 
+ 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_CMD_DMA_DONE, 0);
+ 	dsi_write(msm_host, REG_DSI_CTRL, msm_host->dma_cmd_ctrl_restore);
+ 
+ 	if (!(msg->flags & MIPI_DSI_MSG_USE_LPM))
+ 		dsi_set_tx_power_mode(1, msm_host);
+ 
+ 	/* TODO: unvote for bus bandwidth */
+ 
+-	cfg_hnd->ops->link_clk_disable(msm_host);
+ 	pm_runtime_put(&msm_host->pdev->dev);
+ }
+ 
+ int msm_dsi_host_cmd_tx(struct mipi_dsi_host *host,
+ 				const struct mipi_dsi_msg *msg)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
+ 	return dsi_cmds2buf_tx(msm_host, msg);
+ }
+ 
+ int msm_dsi_host_cmd_rx(struct mipi_dsi_host *host,
+ 				const struct mipi_dsi_msg *msg)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+ 	int data_byte, rx_byte, dlen, end;
+ 	int short_response, diff, pkt_size, ret = 0;
+ 	char cmd;
+ 	int rlen = msg->rx_len;
+ 	u8 *buf;
+ 
+ 	if (rlen <= 2) {
+ 		short_response = 1;
+ 		pkt_size = rlen;
+ 		rx_byte = 4;
+ 	} else {
+ 		short_response = 0;
+ 		data_byte = 10;	/* first read */
+ 		if (rlen < data_byte)
+ 			pkt_size = rlen;
+ 		else
+ 			pkt_size = data_byte;
+ 		rx_byte = data_byte + 6; /* 4 header + 2 crc */
+ 	}
+ 
+ 	buf = msm_host->rx_buf;
+ 	end = 0;
+ 	while (!end) {
+ 		u8 tx[2] = {pkt_size & 0xff, pkt_size >> 8};
+ 		struct mipi_dsi_msg max_pkt_size_msg = {
+ 			.channel = msg->channel,
+ 			.type = MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE,
+ 			.tx_len = 2,
+ 			.tx_buf = tx,
+ 		};
+ 
+ 		DBG("rlen=%d pkt_size=%d rx_byte=%d",
+ 			rlen, pkt_size, rx_byte);
+ 
+ 		ret = dsi_cmds2buf_tx(msm_host, &max_pkt_size_msg);
+ 		if (ret < 2) {
+ 			pr_err("%s: Set max pkt size failed, %d\n",
+ 				__func__, ret);
+ 			return -EINVAL;
+ 		}
+ 
+ 		if ((cfg_hnd->major == MSM_DSI_VER_MAJOR_6G) &&
+ 			(cfg_hnd->minor >= MSM_DSI_6G_VER_MINOR_V1_1)) {
+ 			/* Clear the RDBK_DATA registers */
+ 			dsi_write(msm_host, REG_DSI_RDBK_DATA_CTRL,
+ 					DSI_RDBK_DATA_CTRL_CLR);
+ 			wmb(); /* make sure the RDBK registers are cleared */
+ 			dsi_write(msm_host, REG_DSI_RDBK_DATA_CTRL, 0);
+ 			wmb(); /* release cleared status before transfer */
+ 		}
+ 
+ 		ret = dsi_cmds2buf_tx(msm_host, msg);
+ 		if (ret < 0) {
+ 			pr_err("%s: Read cmd Tx failed, %d\n", __func__, ret);
+ 			return ret;
+ 		} else if (ret < msg->tx_len) {
+ 			pr_err("%s: Read cmd Tx failed, too short: %d\n", __func__, ret);
+ 			return -ECOMM;
+ 		}
+ 
+ 		/*
+ 		 * once cmd_dma_done interrupt received,
+ 		 * return data from client is ready and stored
+ 		 * at RDBK_DATA register already
+ 		 * since rx fifo is 16 bytes, dcs header is kept at first loop,
+ 		 * after that dcs header lost during shift into registers
+ 		 */
+ 		dlen = dsi_cmd_dma_rx(msm_host, buf, rx_byte, pkt_size);
+ 
+ 		if (dlen <= 0)
+ 			return 0;
+ 
+ 		if (short_response)
+ 			break;
+ 
+ 		if (rlen <= data_byte) {
+ 			diff = data_byte - rlen;
+ 			end = 1;
+ 		} else {
+@@ -2409,190 +2405,191 @@ void msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
+ }
+ 
+ void msm_dsi_host_enable_irq(struct mipi_dsi_host *host)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
+ 	enable_irq(msm_host->irq);
+ }
+ 
+ void msm_dsi_host_disable_irq(struct mipi_dsi_host *host)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
+ 	disable_irq(msm_host->irq);
+ }
+ 
+ int msm_dsi_host_enable(struct mipi_dsi_host *host)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
+ 	dsi_op_mode_config(msm_host,
+ 		!!(msm_host->mode_flags & MIPI_DSI_MODE_VIDEO), true);
+ 
+ 	/* TODO: clock should be turned off for command mode,
+ 	 * and only turned on before MDP START.
+ 	 * This part of code should be enabled once mdp driver support it.
+ 	 */
+ 	/* if (msm_panel->mode == MSM_DSI_CMD_MODE) {
+ 	 *	dsi_link_clk_disable(msm_host);
+ 	 *	pm_runtime_put(&msm_host->pdev->dev);
+ 	 * }
+ 	 */
+ 	msm_host->enabled = true;
+ 	return 0;
+ }
+ 
+ int msm_dsi_host_disable(struct mipi_dsi_host *host)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
+ 	msm_host->enabled = false;
+ 	dsi_op_mode_config(msm_host,
+ 		!!(msm_host->mode_flags & MIPI_DSI_MODE_VIDEO), false);
+ 
+ 	/* Since we have disabled INTF, the video engine won't stop so that
+ 	 * the cmd engine will be blocked.
+ 	 * Reset to disable video engine so that we can send off cmd.
+ 	 */
+ 	dsi_sw_reset(msm_host);
+ 
+ 	return 0;
+ }
+ 
+ static void msm_dsi_sfpb_config(struct msm_dsi_host *msm_host, bool enable)
+ {
+ 	enum sfpb_ahb_arb_master_port_en en;
+ 
+ 	if (!msm_host->sfpb)
+ 		return;
+ 
+ 	en = enable ? SFPB_MASTER_PORT_ENABLE : SFPB_MASTER_PORT_DISABLE;
+ 
+ 	regmap_update_bits(msm_host->sfpb, REG_SFPB_GPREG,
+ 			SFPB_GPREG_MASTER_PORT_EN__MASK,
+ 			SFPB_GPREG_MASTER_PORT_EN(en));
+ }
+ 
+ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
+ 			struct msm_dsi_phy_shared_timings *phy_shared_timings,
+ 			bool is_bonded_dsi, struct msm_dsi_phy *phy)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+ 	int ret = 0;
+ 
+ 	mutex_lock(&msm_host->dev_mutex);
+ 	if (msm_host->power_on) {
+ 		DBG("dsi host already on");
+ 		goto unlock_ret;
+ 	}
+ 
+ 	msm_host->byte_intf_clk_rate = msm_host->byte_clk_rate;
+ 	if (phy_shared_timings->byte_intf_clk_div_2)
+ 		msm_host->byte_intf_clk_rate /= 2;
+ 
+ 	msm_dsi_sfpb_config(msm_host, true);
+ 
+ 	ret = regulator_bulk_enable(msm_host->cfg_hnd->cfg->num_regulators,
+ 				    msm_host->supplies);
+ 	if (ret) {
+ 		pr_err("%s:Failed to enable vregs.ret=%d\n",
+ 			__func__, ret);
+ 		goto unlock_ret;
+ 	}
+ 
++	/* Keep link clocks and the OPP vote for the entire powered interval. */
+ 	pm_runtime_get_sync(&msm_host->pdev->dev);
+ 	ret = cfg_hnd->ops->link_clk_set_rate(msm_host);
+ 	if (!ret)
+ 		ret = cfg_hnd->ops->link_clk_enable(msm_host);
+ 	if (ret) {
+ 		pr_err("%s: failed to enable link clocks. ret=%d\n",
+ 		       __func__, ret);
+ 		goto fail_disable_reg;
+ 	}
+ 
+ 	ret = pinctrl_pm_select_default_state(&msm_host->pdev->dev);
+ 	if (ret) {
+ 		pr_err("%s: failed to set pinctrl default state, %d\n",
+ 			__func__, ret);
+ 		goto fail_disable_clk;
+ 	}
+ 
+ 	dsi_timing_setup(msm_host, is_bonded_dsi);
+ 	dsi_sw_reset(msm_host);
+ 	dsi_ctrl_enable(msm_host, phy_shared_timings, phy);
+ 
+ 	msm_host->power_on = true;
+ 	mutex_unlock(&msm_host->dev_mutex);
+ 
+ 	return 0;
+ 
+ fail_disable_clk:
+ 	cfg_hnd->ops->link_clk_disable(msm_host);
+ 	pm_runtime_put(&msm_host->pdev->dev);
+ fail_disable_reg:
+ 	regulator_bulk_disable(msm_host->cfg_hnd->cfg->num_regulators,
+ 			       msm_host->supplies);
+ unlock_ret:
+ 	mutex_unlock(&msm_host->dev_mutex);
+ 	return ret;
+ }
+ 
+ int msm_dsi_host_power_off(struct mipi_dsi_host *host)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+ 
+ 	mutex_lock(&msm_host->dev_mutex);
+ 	if (!msm_host->power_on) {
+ 		DBG("dsi host already off");
+ 		goto unlock_ret;
+ 	}
+ 
+ 	dsi_ctrl_disable(msm_host);
+ 
+ 	pinctrl_pm_select_sleep_state(&msm_host->pdev->dev);
+ 
+ 	cfg_hnd->ops->link_clk_disable(msm_host);
+ 	pm_runtime_put(&msm_host->pdev->dev);
+ 
+ 	regulator_bulk_disable(msm_host->cfg_hnd->cfg->num_regulators,
+ 			       msm_host->supplies);
+ 
+ 	msm_dsi_sfpb_config(msm_host, false);
+ 
+ 	DBG("-");
+ 
+ 	msm_host->power_on = false;
+ 
+ unlock_ret:
+ 	mutex_unlock(&msm_host->dev_mutex);
+ 	return 0;
+ }
+ 
+ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
+ 				  const struct drm_display_mode *mode)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
+ 	if (msm_host->mode) {
+ 		drm_mode_destroy(msm_host->dev, msm_host->mode);
+ 		msm_host->mode = NULL;
+ 	}
+ 
+ 	msm_host->mode = drm_mode_duplicate(msm_host->dev, mode);
+ 	if (!msm_host->mode) {
+ 		pr_err("%s: cannot duplicate mode\n", __func__);
+ 		return -ENOMEM;
+ 	}
+ 
+ 	return 0;
+ }
+ 
+ enum drm_mode_status msm_dsi_host_check_dsc(struct mipi_dsi_host *host,
+ 					    const struct drm_display_mode *mode)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 	struct drm_dsc_config *dsc = msm_host->dsc;
+ 	int pic_width = mode->hdisplay;
+ 	int pic_height = mode->vdisplay;

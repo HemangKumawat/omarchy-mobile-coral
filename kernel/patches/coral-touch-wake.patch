@@ -1,0 +1,372 @@
+diff --git a/drivers/input/touchscreen/fts_touch/fts.c b/drivers/input/touchscreen/fts_touch/fts.c
+index 92010d2f3..b09913fb9 100644
+--- a/drivers/input/touchscreen/fts_touch/fts.c
++++ b/drivers/input/touchscreen/fts_touch/fts.c
+@@ -3995,6 +3995,7 @@ static irqreturn_t fts_interrupt_handler(int irq, void *handle)
+ 	unsigned char events_remaining = 0;
+ 	unsigned char *evt_data;
+ 	bool processed_pointer_event = false;
++	bool gesture_irq = READ_ONCE(info->sensor_sleep);
+ 
+ #ifdef CONFIG_TOUCHSCREEN_OFFLOAD
+ 	struct touch_offload_frame *frame = NULL;
+@@ -4003,7 +4004,10 @@ static irqreturn_t fts_interrupt_handler(int irq, void *handle)
+ 	/* It is possible that interrupts were disabled while the handler is
+ 	 * executing, before acquiring the mutex. If so, simply return.
+ 	 */
+-	if (fts_set_bus_ref(info, FTS_BUS_REF_IRQ, true) < 0) {
++	if (gesture_irq && (!READ_ONCE(info->gesture_ready) ||
++		!IS_POWER_MODE(info->mode, SCAN_MODE_LOW_POWER)))
++		return IRQ_HANDLED;
++	if (!gesture_irq && fts_set_bus_ref(info, FTS_BUS_REF_IRQ, true) < 0) {
+ 		fts_set_bus_ref(info, FTS_BUS_REF_IRQ, false);
+ 		return IRQ_HANDLED;
+ 	}
+@@ -4090,7 +4094,8 @@ static irqreturn_t fts_interrupt_handler(int irq, void *handle)
+ 	update_motion_filter(info);
+ 
+ 	cpu_latency_qos_update_request(&info->pm_qos_req, PM_QOS_DEFAULT_VALUE);
+-	fts_set_bus_ref(info, FTS_BUS_REF_IRQ, false);
++	if (!gesture_irq)
++		fts_set_bus_ref(info, FTS_BUS_REF_IRQ, false);
+ 	return IRQ_HANDLED;
+ }
+ /** @}*/
+@@ -4572,6 +4577,14 @@ int fts_chip_powercycle(struct fts_ts_info *info)
+ static int fts_init_sensing(struct fts_ts_info *info)
+ {
+ 	int error = 0;
++	u8 gesture[GESTURE_MASK_SIZE] = { 0 };
++
++	/* Volatile gesture mask only; never touch firmware or calibration. */
++	fromIDtoMask(GEST_ID_DBLTAP, gesture, sizeof(gesture));
++	error = updateGestureMask(gesture, sizeof(gesture), FEAT_ENABLE);
++	if (error < OK)
++		return error;
++	info->gesture_enabled = 1;
+ 	error |= fts_interrupt_install(info);	/* register event handler */
+ 	error |= fts_mode_handler(info, 0);	/* enable the features and
+ 						 * sensing */
+@@ -4605,16 +4618,42 @@ static int fts_init_sensing(struct fts_ts_info *info)
+   * the feature changed status or the IC had a system reset
+   * @return OK if success or an error code which specify the type of error
+   */
++/* Caller holds mode_mutex; update software state only after the IRQ API succeeds. */
++static int fts_irq_wake_set(struct fts_ts_info *info, bool enable)
++{
++	int ret;
++
++	if (info->irq_wake_enabled == enable)
++		return 0;
++	ret = enable ? enable_irq_wake(info->client->irq) :
++		disable_irq_wake(info->client->irq);
++	if (ret) {
++		pr_err("fts: IRQ wake %s failed: %d\n", enable ? "enable" : "disable", ret);
++		return ret;
++	}
++	WRITE_ONCE(info->irq_wake_enabled, enable);
++	return 0;
++}
++
++static bool fts_suspend_ready(struct fts_ts_info *info)
++{
++	return !info->bus_refmask && !info->resume_bit && info->sensor_sleep &&
++		info->gesture_ready && info->irq_wake_enabled &&
++		IS_POWER_MODE(info->mode, SCAN_MODE_LOW_POWER);
++}
++
+ static int fts_mode_handler(struct fts_ts_info *info, int force)
+ {
+ 	int res = OK;
+ 	int ret = OK;
+ 	u8 settings[4] = { 0 };
+ 
+-	/* disable irq wake because resuming from gesture mode */
+-	if (IS_POWER_MODE(info->mode, SCAN_MODE_LOW_POWER) &&
+-	    (info->resume_bit == 1))
+-		disable_irq_wake(info->client->irq);
++	guard(mutex)(&info->mode_mutex);
++	/* Recovery may re-enter low power repeatedly; never accumulate wake depth. */
++	WRITE_ONCE(info->gesture_ready, false);
++	ret = fts_irq_wake_set(info, false);
++	if (ret)
++		return ret;
+ 
+ 	info->mode = MODE_NOTHING;	/* initialize the mode to nothing
+ 					  * in order to be updated depending
+@@ -4631,8 +4670,10 @@ static int fts_mode_handler(struct fts_ts_info *info, int force)
+ 		/* for speed reason (no need to check echo in this case and
+ 		  * interrupt can be enabled) */
+ 		ret = setScanMode(SCAN_MODE_ACTIVE, 0x00);
+-		res |= ret;	/* to avoid warning unsused ret variable when a
+-				  * ll the features are disabled */
++		if (ret < OK) {
++			pr_err("fts: sense-off failed: %08X\n", ret);
++			return ret;
++		}
+ 
+ #ifdef GESTURE_MODE
+ 		if (info->gesture_enabled == 1) {
+@@ -4640,11 +4681,16 @@ static int fts_mode_handler(struct fts_ts_info *info, int force)
+ 				 __func__);
+ 			res = enterGestureMode(isSystemResettedDown());
+ 			if (res >= OK) {
+-				enable_irq_wake(info->client->irq);
++				ret = fts_irq_wake_set(info, true);
++				if (ret) {
++					pr_err("fts: gesture IRQ wake failed: %d\n", ret);
++					return ret;
++				}
+ 				fromIDtoMask(FEAT_SEL_GESTURE,
+ 					     (u8 *)&info->mode,
+ 					     sizeof(info->mode));
+ 				MODE_LOW_POWER(info->mode, 0);
++				WRITE_ONCE(info->gesture_ready, true);
+ 			} else
+ 				pr_err("%s: enterGestureMode failed! ERROR %08X recovery in senseOff...\n",
+ 					__func__, res);
+@@ -4815,6 +4861,7 @@ static void fts_resume_work(struct work_struct *work)
+ 
+ 	__pm_wakeup_event(info->wakesrc, jiffies_to_msecs(HZ));
+ 
++	fts_enableInterrupt(false);
+ 	info->resume_bit = 1;
+ 
+ 	fts_system_reset();
+@@ -4842,6 +4889,7 @@ static void fts_resume_work(struct work_struct *work)
+ static void fts_suspend_work(struct work_struct *work)
+ {
+ 	struct fts_ts_info *info;
++	int ret;
+ 
+ 	info = container_of(work, struct fts_ts_info, suspend_work);
+ 
+@@ -4852,26 +4900,20 @@ static void fts_suspend_work(struct work_struct *work)
+ 
+ 	__pm_stay_awake(info->wakesrc);
+ 
+-	info->resume_bit = 0;
+-
+-	fts_mode_handler(info, 0);
+-
+-	release_all_touches(info);
+-
++	/* Drain active touches before enabling the low-power gesture scanner.
++	 * A reset here would erase gesture mode. SLPI is not the bus owner.
++	 */
+ 	fts_enableInterrupt(false);
+-
+-	/* Flush any outstanding touch events */
+-	fts_system_reset();
+ 	flushFIFO();
+-
+-	fts_set_switch_gpio(info, FTS_SWITCH_GPIO_VALUE_SLPI_MASTER);
+-
+-#ifdef CONFIG_TOUCHSCREEN_TBN
+-	if (info->tbn)
+-		tbn_release_bus(info->tbn);
+-#endif
+-
+-	info->sensor_sleep = true;
++	info->resume_bit = 0;
++	ret = fts_mode_handler(info, 0);
++	if (ret < OK)
++		pr_err("fts: gesture suspend setup failed: %08X\n", ret);
++	release_all_touches(info);
++	fts_set_switch_gpio(info, FTS_SWITCH_GPIO_VALUE_AP_MASTER);
++	WRITE_ONCE(info->sensor_sleep, true);
++	/* enterGestureMode() may itself enable IRQs before a later failure. */
++	fts_enableInterrupt(READ_ONCE(info->gesture_ready));
+ 	__pm_relax(info->wakesrc);
+ }
+ /** @}*/
+@@ -4939,72 +4981,33 @@ int fts_set_bus_ref(struct fts_ts_info *info, u16 ref, bool enable)
+ 	return result;
+ }
+ 
+-// /**
+-//   * Callback function used to detect the suspend/resume events generated by
+-//   * clicking the power button.
+-//   * This function schedule a suspend or resume work according to the event
+-//   * received.
+-//   */
+-// static int fts_screen_state_chg_callback(struct notifier_block *nb,
+-// 					 unsigned long val, void *data)
+-// {
+-// 	struct fts_ts_info *info = container_of(nb, struct fts_ts_info,
+-// 						notifier);
+-// 	struct msm_drm_notifier *evdata = data;
+-// 	unsigned int blank;
+-
+-// 	if (val != MSM_DRM_EVENT_BLANK && val != MSM_DRM_EARLY_EVENT_BLANK)
+-// 		return NOTIFY_DONE;
+-
+-// 	if (!info || !evdata || !evdata->data) {
+-// 		pr_info("%s: Bad fts notifier call!\n", __func__);
+-// 		return NOTIFY_DONE;
+-// 	}
+-
+-// 	pr_debug("%s: fts notifier begin!\n", __func__);
+-
+-// 	blank = *(int *) (evdata->data);
+-// 	switch (blank) {
+-// 	case MSM_DRM_BLANK_POWERDOWN:
+-// 	case MSM_DRM_BLANK_LP:
+-// 		if (val == MSM_DRM_EARLY_EVENT_BLANK) {
+-// 			pr_debug("%s: BLANK\n", __func__);
+-// 			fts_set_bus_ref(info, FTS_BUS_REF_SCREEN_ON, false);
+-// 		}
+-// 		break;
+-// 	case MSM_DRM_BLANK_UNBLANK:
+-// 		if (val == MSM_DRM_EVENT_BLANK) {
+-// 			pr_debug("%s: UNBLANK\n", __func__);
+-// 			fts_set_bus_ref(info, FTS_BUS_REF_SCREEN_ON, true);
+-// 		}
+-// 		break;
+-// 	}
+-
+-// 	if (info->display_refresh_rate != evdata->refresh_rate) {
+-// 		info->display_refresh_rate = evdata->refresh_rate;
+-// 		if (gpio_is_valid(info->board->disp_rate_gpio))
+-// 			gpio_set_value(info->board->disp_rate_gpio,
+-// 				(info->display_refresh_rate == 90));
+-// 		pr_debug("Refresh rate changed to %d Hz.\n",
+-// 			info->display_refresh_rate);
+-// 	}
+-
+-// 	return NOTIFY_OK;
+-// }
++static int fts_panel_prepared(struct drm_panel_follower *follower)
++{
++	struct fts_ts_info *info = container_of(follower, struct fts_ts_info,
++					      panel_follower);
+ 
+-// static struct notifier_block fts_noti_block = {
+-// 	.notifier_call = fts_screen_state_chg_callback,
+-// };
++	if (!(info->bus_refmask & FTS_BUS_REF_SCREEN_ON))
++		fts_set_bus_ref(info, FTS_BUS_REF_SCREEN_ON, true);
++	flush_work(&info->resume_work);
++	return 0;
++}
++
++static int fts_panel_unpreparing(struct drm_panel_follower *follower)
++{
++	struct fts_ts_info *info = container_of(follower, struct fts_ts_info,
++					      panel_follower);
++
++	if (info->bus_refmask & FTS_BUS_REF_SCREEN_ON)
++		fts_set_bus_ref(info, FTS_BUS_REF_SCREEN_ON, false);
++	flush_work(&info->suspend_work);
++	return 0;
++}
++
++static const struct drm_panel_follower_funcs fts_panel_funcs = {
++	.panel_prepared = fts_panel_prepared,
++	.panel_unpreparing = fts_panel_unpreparing,
++};
+ 
+-/**
+-  * From the name of the power regulator get/put the actual regulator structs
+-  * (copying their references into fts_ts_info variable)
+-  * @param info pointer to fts_ts_info which contains info about the device and
+-  * its hw setup
+-  * @param get if 1, the regulators are get otherwise they are put (released)
+-  * back to the system
+-  * @return OK if success or an error code which specify the type of error
+-  */
+ static int fts_get_reg(struct fts_ts_info *info, bool get)
+ {
+ 	int retval;
+@@ -5500,6 +5503,7 @@ static int fts_probe(struct spi_device *client)
+ 
+ 	mutex_init(&(info->input_report_mutex));
+ 	mutex_init(&info->bus_mutex);
++	mutex_init(&info->mode_mutex);
+ 
+ 	/* Assume screen is on throughout probe */
+ 	info->bus_refmask = FTS_BUS_REF_SCREEN_ON;
+@@ -5536,7 +5540,7 @@ static int fts_probe(struct spi_device *client)
+ 	info->grip_enabled = 0;
+ 
+ 	info->resume_bit = 1;
+-	// info->notifier = fts_noti_block;
++
+ 
+ 	/* Set initial heatmap mode based on the device tree configuration.
+ 	 * Default is partial heatmap mode.
+@@ -5650,6 +5654,14 @@ static int fts_probe(struct spi_device *client)
+ 		goto ProbeErrorExit_7;
+ 	}
+ 
++	info->panel_follower.funcs = &fts_panel_funcs;
++	error = drm_panel_add_follower(&client->dev, &info->panel_follower);
++	if (error) {
++		sysfs_remove_group(&client->dev.kobj, &info->attrs);
++		goto ProbeErrorExit_7;
++	}
++	device_init_wakeup(&client->dev, true);
++
+ 	/* Raw maintenance commands must never be exposed on coral. */
+ 
+ 	if (info->fwu_workqueue)
+@@ -5728,6 +5740,9 @@ static void fts_remove(struct spi_device *client)
+ 
+ 	struct fts_ts_info *info = dev_get_drvdata(&(client->dev));
+ 
++	drm_panel_remove_follower(&info->panel_follower);
++	device_init_wakeup(&client->dev, false);
++
+ 	/* Force the bus active throughout removal of the client */
+ 	fts_set_bus_ref(info, FTS_BUS_REF_FORCE_ACTIVE, true);
+ 
+@@ -5742,6 +5757,14 @@ static void fts_remove(struct spi_device *client)
+ 	/* sysfs stuff */
+ 	sysfs_remove_group(&client->dev.kobj, &info->attrs);
+ 
++	/* Stop recovery IRQs before balancing wake depth and freeing the IRQ. */
++	fts_enableInterrupt(false);
++	synchronize_irq(client->irq);
++	{
++		guard(mutex)(&info->mode_mutex);
++		WRITE_ONCE(info->gesture_ready, false);
++		fts_irq_wake_set(info, false);
++	}
+ 	/* remove interrupt and event handlers */
+ 	fts_interrupt_uninstall(info);
+ 
+@@ -5795,12 +5818,15 @@ static int fts_pm_suspend(struct device *dev)
+ {
+ 	struct fts_ts_info *info = dev_get_drvdata(dev);
+ 
++	flush_work(&info->suspend_work);
+ 	if (info->bus_refmask)
+ 		pr_warn("%s: bus_refmask 0x%X\n", __func__, info->bus_refmask);
+ 
+-	if (info->resume_bit == 1 || info->sensor_sleep == false) {
+-		pr_warn("%s: can't suspend because touch bus is in use!\n",
+-			__func__);
++	guard(mutex)(&info->mode_mutex);
++	if (!fts_suspend_ready(info)) {
++		pr_warn("%s: touch/gesture wake not ready: sleep=%d gesture=%d irq_wake=%d mode=%08X\n",
++			__func__, info->sensor_sleep, info->gesture_ready,
++			info->irq_wake_enabled, info->mode);
+ 		return -EBUSY;
+ 	}
+ 
+diff --git a/drivers/input/touchscreen/fts_touch/fts.h b/drivers/input/touchscreen/fts_touch/fts.h
+index 4459782f3..f30ea19e1 100644
+--- a/drivers/input/touchscreen/fts_touch/fts.h
++++ b/drivers/input/touchscreen/fts_touch/fts.h
+@@ -444,7 +444,10 @@ struct fts_ts_info {
+ 
+ 	struct fts_disp_extinfo extinfo;	/* Display extended info */
+ 
+-	struct notifier_block notifier;	/* Notify on suspend/resume */
++	struct drm_panel_follower panel_follower;
++	struct mutex mode_mutex;
++	bool irq_wake_enabled;
++	bool gesture_ready;
+ 	int display_refresh_rate;	/* Display rate in Hz */
+ 	bool sensor_sleep;		/* True if suspend called */
+ 	struct wakeup_source *wakesrc;	/* Wake Lock struct */

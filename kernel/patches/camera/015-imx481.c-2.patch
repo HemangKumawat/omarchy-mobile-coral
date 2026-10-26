@@ -1,0 +1,406 @@
+--- a/drivers/media/i2c/imx481.c
++++ b/drivers/media/i2c/imx481.c
+@@ -398,3 +398,403 @@
+  * @code: V4L2 sub-device code enumeration need to be filled
+  *
+  * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_enum_mbus_code(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *sd_state,
++				 struct v4l2_subdev_mbus_code_enum *code)
++{
++	if (code->index > 0)
++		return -EINVAL;
++
++	code->code = supported_mode.code;
++
++	return 0;
++}
++
++/**
++ * imx481_enum_frame_size() - Enumerate V4L2 sub-device frame sizes
++ * @sd: pointer to imx481 V4L2 sub-device structure
++ * @sd_state: V4L2 sub-device configuration
++ * @fsize: V4L2 sub-device size enumeration need to be filled
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_enum_frame_size(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *sd_state,
++				  struct v4l2_subdev_frame_size_enum *fsize)
++{
++	if (fsize->index > 0)
++		return -EINVAL;
++
++	if (fsize->code != supported_mode.code)
++		return -EINVAL;
++
++	fsize->min_width = supported_mode.width;
++	fsize->max_width = fsize->min_width;
++	fsize->min_height = supported_mode.height;
++	fsize->max_height = fsize->min_height;
++
++	return 0;
++}
++
++/**
++ * imx481_fill_pad_format() - Fill subdevice pad format
++ *                            from selected sensor mode
++ * @imx481: pointer to imx481 device
++ * @mode: pointer to imx481_mode sensor mode
++ * @fmt: V4L2 sub-device format need to be filled
++ */
++static void imx481_fill_pad_format(struct imx481 *imx481,
++				   const struct imx481_mode *mode,
++				   struct v4l2_subdev_format *fmt)
++{
++	fmt->format.width = mode->width;
++	fmt->format.height = mode->height;
++	fmt->format.code = mode->code;
++	fmt->format.field = V4L2_FIELD_NONE;
++	fmt->format.colorspace = V4L2_COLORSPACE_RAW;
++	fmt->format.ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
++	fmt->format.quantization = V4L2_QUANTIZATION_DEFAULT;
++	fmt->format.xfer_func = V4L2_XFER_FUNC_NONE;
++}
++
++/**
++ * imx481_get_pad_format() - Get subdevice pad format
++ * @sd: pointer to imx481 V4L2 sub-device structure
++ * @sd_state: V4L2 sub-device configuration
++ * @fmt: V4L2 sub-device format need to be set
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_get_pad_format(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *sd_state,
++				 struct v4l2_subdev_format *fmt)
++{
++	struct imx481 *imx481 = to_imx481(sd);
++
++	mutex_lock(&imx481->mutex);
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
++		struct v4l2_mbus_framefmt *framefmt;
++
++		framefmt = v4l2_subdev_state_get_format(sd_state, fmt->pad);
++		fmt->format = *framefmt;
++	} else {
++		imx481_fill_pad_format(imx481, imx481->cur_mode, fmt);
++	}
++
++	mutex_unlock(&imx481->mutex);
++
++	return 0;
++}
++
++/**
++ * imx481_set_pad_format() - Set subdevice pad format
++ * @sd: pointer to imx481 V4L2 sub-device structure
++ * @sd_state: V4L2 sub-device configuration
++ * @fmt: V4L2 sub-device format need to be set
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_set_pad_format(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *sd_state,
++				 struct v4l2_subdev_format *fmt)
++{
++	struct imx481 *imx481 = to_imx481(sd);
++	const struct imx481_mode *mode;
++	int ret = 0;
++
++	mutex_lock(&imx481->mutex);
++
++	mode = &supported_mode;
++	imx481_fill_pad_format(imx481, mode, fmt);
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
++		struct v4l2_mbus_framefmt *framefmt;
++
++		framefmt = v4l2_subdev_state_get_format(sd_state, fmt->pad);
++		*framefmt = fmt->format;
++	} else {
++		ret = imx481_update_controls(imx481, mode);
++		if (!ret)
++			imx481->cur_mode = mode;
++	}
++
++	mutex_unlock(&imx481->mutex);
++
++	return ret;
++}
++
++static int imx481_get_selection(struct v4l2_subdev *sd,
++				struct v4l2_subdev_state *sd_state,
++				struct v4l2_subdev_selection *sel)
++{
++	if (sel->which != V4L2_SUBDEV_FORMAT_ACTIVE)
++		return -EINVAL;
++
++	switch (sel->target) {
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP:
++		sel->r = (struct v4l2_rect) { 0, 0, 4656, 3496 };
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++/**
++ * imx481_init_state() - Initialize sub-device state
++ * @sd: pointer to imx481 V4L2 sub-device structure
++ * @sd_state: V4L2 sub-device configuration
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_init_state(struct v4l2_subdev *sd,
++			     struct v4l2_subdev_state *sd_state)
++{
++	struct imx481 *imx481 = to_imx481(sd);
++	struct v4l2_subdev_format fmt = { 0 };
++
++	fmt.which = sd_state ? V4L2_SUBDEV_FORMAT_TRY : V4L2_SUBDEV_FORMAT_ACTIVE;
++	imx481_fill_pad_format(imx481, &supported_mode, &fmt);
++
++	return imx481_set_pad_format(sd, sd_state, &fmt);
++}
++
++/**
++ * imx481_start_streaming() - Start sensor stream
++ * @imx481: pointer to imx481 device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_start_streaming(struct imx481 *imx481)
++{
++	const struct imx481_reg_list *reg_list;
++	int ret;
++
++	ret = imx481_write_regs(imx481, imx481_init_regs,
++				ARRAY_SIZE(imx481_init_regs));
++	if (ret) {
++		dev_err(imx481->dev, "failed to write global registers\n");
++		return ret;
++	}
++
++	/* Write sensor mode registers */
++	reg_list = &imx481->cur_mode->reg_list;
++	ret = imx481_write_regs(imx481, reg_list->regs,
++				reg_list->num_of_regs);
++	if (ret) {
++		dev_err(imx481->dev, "failed to write mode registers\n");
++		return ret;
++	}
++
++	/* Setup handler will write actual exposure and gain */
++	ret =  __v4l2_ctrl_handler_setup(imx481->sd.ctrl_handler);
++	if (ret) {
++		dev_err(imx481->dev, "fail to setup handler\n");
++		return ret;
++	}
++
++	/* Start streaming */
++	ret = imx481_write_reg(imx481, IMX481_REG_MODE_SELECT,
++			       1, IMX481_MODE_STREAMING);
++	if (ret) {
++		dev_err(imx481->dev, "failed to start streaming\n");
++		return ret;
++	}
++
++	dev_info(imx481->dev, "streaming 4656x3496 RAW10 over four-lane D-PHY\n");
++
++	return 0;
++}
++
++/**
++ * imx481_stop_streaming() - Stop sensor stream
++ * @imx481: pointer to imx481 device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_stop_streaming(struct imx481 *imx481)
++{
++	return imx481_write_reg(imx481, IMX481_REG_MODE_SELECT,
++				1, IMX481_MODE_STANDBY);
++}
++
++/**
++ * imx481_set_stream() - Enable sensor streaming
++ * @sd: pointer to imx481 subdevice
++ * @enable: set to enable sensor streaming
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_set_stream(struct v4l2_subdev *sd, int enable)
++{
++	struct imx481 *imx481 = to_imx481(sd);
++	int ret;
++
++	mutex_lock(&imx481->mutex);
++
++	if (enable) {
++		ret = pm_runtime_resume_and_get(imx481->dev);
++		if (ret)
++			goto error_unlock;
++
++		ret = imx481_start_streaming(imx481);
++		if (ret)
++			goto error_power_off;
++	} else {
++		imx481_stop_streaming(imx481);
++		pm_runtime_put(imx481->dev);
++	}
++
++	mutex_unlock(&imx481->mutex);
++
++	return 0;
++
++error_power_off:
++	pm_runtime_put(imx481->dev);
++error_unlock:
++	mutex_unlock(&imx481->mutex);
++
++	return ret;
++}
++
++/**
++ * imx481_detect() - Detect imx481 sensor
++ * @imx481: pointer to imx481 device
++ *
++ * Return: 0 if successful, -EIO if sensor id does not match
++ */
++static int imx481_detect(struct imx481 *imx481)
++{
++	int ret;
++	u32 val;
++
++	ret = imx481_read_reg(imx481, IMX481_REG_ID, 2, &val);
++	if (ret)
++		return ret;
++
++	if (val != IMX481_ID) {
++		dev_err(imx481->dev, "chip id mismatch: %x!=%x\n",
++			IMX481_ID, val);
++		return -ENXIO;
++	}
++
++	dev_info(imx481->dev, "coral-camera chip-id=0x%04x\n", val);
++	return 0;
++}
++
++/**
++ * imx481_parse_hw_config() - Parse HW configuration and check if supported
++ * @imx481: pointer to imx481 device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_parse_hw_config(struct imx481 *imx481)
++{
++	struct fwnode_handle *fwnode = dev_fwnode(imx481->dev);
++	struct v4l2_fwnode_endpoint bus_cfg = {
++		.bus_type = V4L2_MBUS_CSI2_DPHY
++	};
++	struct fwnode_handle *ep;
++	unsigned long rate;
++	unsigned int i;
++	int ret;
++
++	if (!fwnode)
++		return -ENXIO;
++
++	/* The GPIO values are logical; reset is active low in the DT. */
++	imx481->reset_gpio = devm_gpiod_get(imx481->dev, "reset",
++					    GPIOD_OUT_HIGH);
++	if (IS_ERR(imx481->reset_gpio)) {
++		dev_err(imx481->dev, "failed to get reset gpio %ld\n",
++			PTR_ERR(imx481->reset_gpio));
++		return PTR_ERR(imx481->reset_gpio);
++	}
++
++	imx481->vana_enable_gpio = devm_gpiod_get_optional(imx481->dev, "vana-enable",
++						  GPIOD_OUT_LOW);
++	if (IS_ERR(imx481->vana_enable_gpio))
++		return dev_err_probe(imx481->dev,
++				     PTR_ERR(imx481->vana_enable_gpio),
++				     "failed to get VANA enable GPIO\n");
++
++	/* Get sensor input clock */
++	imx481->inclk = devm_clk_get(imx481->dev, NULL);
++	if (IS_ERR(imx481->inclk)) {
++		dev_err(imx481->dev, "could not get inclk\n");
++		return PTR_ERR(imx481->inclk);
++	}
++
++	ret = clk_set_rate(imx481->inclk, IMX481_INCLK_RATE);
++	if (ret)
++		return dev_err_probe(imx481->dev, ret,
++				     "could not set 24 MHz input clock\n");
++
++	rate = clk_get_rate(imx481->inclk);
++	if (rate != IMX481_INCLK_RATE) {
++		dev_err(imx481->dev, "inclk frequency mismatch\n");
++		return -EINVAL;
++	}
++
++	imx481->vana = devm_regulator_get(imx481->dev, "vana");
++	if (IS_ERR(imx481->vana))
++		return dev_err_probe(imx481->dev, PTR_ERR(imx481->vana),
++				     "failed to get VANA\n");
++
++	imx481->vdig = devm_regulator_get(imx481->dev, "vdig");
++	if (IS_ERR(imx481->vdig))
++		return dev_err_probe(imx481->dev, PTR_ERR(imx481->vdig),
++				     "failed to get VDIG\n");
++
++	imx481->vio = devm_regulator_get(imx481->dev, "vio");
++	if (IS_ERR(imx481->vio))
++		return dev_err_probe(imx481->dev, PTR_ERR(imx481->vio),
++				     "failed to get VIO\n");
++
++	imx481->auxiliary[0].supply = "vaf";
++	imx481->auxiliary[1].supply = "vextra0";
++	imx481->auxiliary[2].supply = "vextra1";
++	imx481->auxiliary[3].supply = "vextra2";
++	ret = devm_regulator_bulk_get(imx481->dev, ARRAY_SIZE(imx481->auxiliary),
++				      imx481->auxiliary);
++	if (ret)
++		return dev_err_probe(imx481->dev, ret, "failed to get module supplies\n");
++
++	ep = fwnode_graph_get_next_endpoint(fwnode, NULL);
++	if (!ep)
++		return -ENXIO;
++
++	ret = v4l2_fwnode_endpoint_alloc_parse(ep, &bus_cfg);
++	fwnode_handle_put(ep);
++	if (ret)
++		return ret;
++
++	if (bus_cfg.bus_type != V4L2_MBUS_CSI2_DPHY) {
++		dev_err(imx481->dev, "endpoint must use D-PHY\n");
++		ret = -EINVAL;
++		goto done_endpoint_free;
++	}
++
++	if (bus_cfg.bus.mipi_csi2.num_data_lanes != IMX481_NUM_DATA_LANES) {
++		dev_err(imx481->dev,
++			"number of CSI2 data lanes %d is not supported\n",
++			bus_cfg.bus.mipi_csi2.num_data_lanes);
++		ret = -EINVAL;
++		goto done_endpoint_free;
++	}
++
++	if (!bus_cfg.nr_of_link_frequencies) {
++		dev_err(imx481->dev, "no link frequencies defined\n");
++		ret = -EINVAL;
++		goto done_endpoint_free;
++	}
++
++	for (i = 0; i < bus_cfg.nr_of_link_frequencies; i++)
++		if (bus_cfg.link_frequencies[i] == IMX481_LINK_FREQ)
++			goto done_endpoint_free;
++
++	ret = -EINVAL;

@@ -1,0 +1,16 @@
+[Unit]
+Description=Coral SLPI registry file service
+After=systemd-modules-load.service
+ConditionPathExists=/run/coral-sensors-ready
+
+[Service]
+ExecStartPre=/usr/bin/test -c /dev/fastrpc-sdsp
+ExecStart=/usr/local/bin/hexagonrpcd -f /dev/fastrpc-sdsp -d sdsp -s -R /run/coral-qcom
+# Upstream exits successfully when the remote DSP closes its listener.
+Restart=always
+# timeout-policy: PROBE
+RestartSec=10
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

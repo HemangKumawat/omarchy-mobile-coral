@@ -1,0 +1,403 @@
+--- /dev/null
++++ b/drivers/media/i2c/imx363.c
+@@ -0,0 +1,400 @@
++// SPDX-License-Identifier: GPL-2.0
++// Copyright (C) 2018 Intel Corporation
++
++#include <linux/acpi.h>
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
++#include <media/v4l2-cci.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-fwnode.h>
++
++#define IMX363_REG_MODE_SELECT	CCI_REG8(0x0100)
++#define IMX363_MODE_STANDBY		0x00
++#define IMX363_MODE_STREAMING	0x01
++
++#define IMX363_REG_RESET		CCI_REG8(0x0103)
++
++/* Chip ID */
++#define IMX363_REG_CHIP_ID		CCI_REG16(0x0016)
++#define IMX363_CHIP_ID			0x0363
++
++/* V_TIMING internal */
++// basically frame length lines? from downstream
++#define IMX363_VTS_30FPS		3136 //0c40
++// #define IMX363_VTS_30FPS_2K		0x0638
++#define IMX363_VTS_30FPS_HD		1296
++#define IMX363_VTS_MAX			65525
++
++/* HBLANK control - read only */
++#define IMX363_PPL_DEFAULT		8832
++
++/* Exposure control */
++#define IMX363_REG_EXPOSURE		CCI_REG16(0x0202)
++#define IMX363_EXPOSURE_OFFSET	10
++#define IMX363_EXPOSURE_MIN		4
++#define IMX363_EXPOSURE_STEP	1
++#define IMX363_EXPOSURE_DEFAULT	0x640
++#define IMX363_EXPOSURE_MAX		(IMX363_VTS_MAX - IMX363_EXPOSURE_OFFSET)
++
++/* Analog gain control */
++#define IMX363_REG_ANALOG_GAIN	CCI_REG16(0x0204)
++#define IMX363_ANA_GAIN_MIN		0
++#define IMX363_ANA_GAIN_MAX		480
++#define IMX363_ANA_GAIN_STEP	1
++#define IMX363_ANA_GAIN_DEFAULT	0x0
++
++/* Digital gain control */
++#define IMX363_REG_GR_DIGITAL_GAIN	CCI_REG16(0x020e)
++#define IMX363_REG_R_DIGITAL_GAIN	CCI_REG16(0x0210)
++#define IMX363_REG_B_DIGITAL_GAIN	CCI_REG16(0x0212)
++#define IMX363_REG_GB_DIGITAL_GAIN	CCI_REG16(0x0214)
++#define IMX363_DGTL_GAIN_MIN		0
++#define IMX363_DGTL_GAIN_MAX		4096	/* Max = 0xFFF */
++#define IMX363_DGTL_GAIN_DEFAULT	1024
++#define IMX363_DGTL_GAIN_STEP		1
++
++/* HDR control */
++#define IMX363_REG_HDR				CCI_REG8(0x0220)
++#define IMX363_HDR_ON				BIT(0)
++#define IMX363_REG_HDR_RATIO		CCI_REG8(0x0222)
++#define IMX363_HDR_RATIO_MIN		0
++#define IMX363_HDR_RATIO_MAX		5
++#define IMX363_HDR_RATIO_STEP		1
++#define IMX363_HDR_RATIO_DEFAULT	0x0
++
++/* Test Pattern Control */
++#define IMX363_REG_TEST_PATTERN		CCI_REG16(0x0600)
++
++#define IMX363_CLK_BLANK_STOP		CCI_REG8(0x4040)
++
++/* Orientation */
++#define REG_MIRROR_FLIP_CONTROL		CCI_REG8(0x0101)
++#define REG_CONFIG_MIRROR_HFLIP		0x01
++#define REG_CONFIG_MIRROR_VFLIP		0x02
++
++/* IMX363 native and active pixel array size. */
++#define IMX363_NATIVE_WIDTH			4048U
++#define IMX363_NATIVE_HEIGHT		3168U
++#define IMX363_PIXEL_ARRAY_LEFT		8U
++#define IMX363_PIXEL_ARRAY_TOP		24U
++#define IMX363_PIXEL_ARRAY_WIDTH	4032U
++#define IMX363_PIXEL_ARRAY_HEIGHT	3024U
++
++/* regs */
++#define IMX363_REG_PLL_MULT_DRIV                  CCI_REG8(0x0310)
++#define IMX363_REG_IVTPXCK_DIV                    CCI_REG8(0x0301)
++#define IMX363_REG_IVTSYCK_DIV                    CCI_REG8(0x0303)
++#define IMX363_REG_PREPLLCK_VT_DIV                CCI_REG8(0x0305)
++#define IMX363_REG_IOPPXCK_DIV                    CCI_REG8(0x0309)
++#define IMX363_REG_IOPSYCK_DIV                    CCI_REG8(0x030b)
++#define IMX363_REG_PREPLLCK_OP_DIV                CCI_REG8(0x030d)
++#define IMX363_REG_PHASE_PIX_OUTEN                CCI_REG8(0x3030)
++#define IMX363_REG_PDPIX_DATA_RATE                CCI_REG8(0x3032)
++#define IMX363_REG_SCALE_MODE                     CCI_REG8(0x0401)
++#define IMX363_REG_SCALE_MODE_EXT                 CCI_REG8(0x3038)
++#define IMX363_REG_AF_WINDOW_MODE                 CCI_REG8(0x7bcd)
++#define IMX363_REG_FRM_LENGTH_CTL                 CCI_REG8(0x0350)
++#define IMX363_REG_CSI_LANE_MODE                  CCI_REG8(0x0114)
++#define IMX363_REG_X_EVN_INC                      CCI_REG8(0x0381)
++#define IMX363_REG_X_ODD_INC                      CCI_REG8(0x0383)
++#define IMX363_REG_Y_EVN_INC                      CCI_REG8(0x0385)
++#define IMX363_REG_Y_ODD_INC                      CCI_REG8(0x0387)
++#define IMX363_REG_BINNING_MODE                   CCI_REG8(0x0900)
++#define IMX363_REG_BINNING_TYPE_V                 CCI_REG8(0x0901)
++#define IMX363_REG_FORCE_FD_SUM                   CCI_REG8(0x300d)
++#define IMX363_REG_DIG_CROP_X_OFFSET              CCI_REG16(0x0408)
++#define IMX363_REG_DIG_CROP_Y_OFFSET              CCI_REG16(0x040a)
++#define IMX363_REG_DIG_CROP_IMAGE_WIDTH           CCI_REG16(0x040c)
++#define IMX363_REG_DIG_CROP_IMAGE_HEIGHT          CCI_REG16(0x040e)
++#define IMX363_REG_SCALE_M                        CCI_REG16(0x0404)
++#define IMX363_REG_X_OUT_SIZE                     CCI_REG16(0x034c)
++#define IMX363_REG_Y_OUT_SIZE                     CCI_REG16(0x034e)
++#define IMX363_REG_X_ADD_STA                      CCI_REG16(0x0344)
++#define IMX363_REG_Y_ADD_STA                      CCI_REG16(0x0346)
++#define IMX363_REG_X_ADD_END                      CCI_REG16(0x0348)
++#define IMX363_REG_Y_ADD_END                      CCI_REG16(0x034a)
++#define IMX363_REG_EXCK_FREQ                      CCI_REG16(0x0136)
++#define IMX363_REG_CSI_DT_FMT                     CCI_REG16(0x0112)
++#define IMX363_REG_LINE_LENGTH_PCK                CCI_REG16(0x0342)
++#define IMX363_REG_SCALE_M_EXT                    CCI_REG16(0x303a)
++#define IMX363_REG_FRM_LENGTH_LINES               CCI_REG16(0x0340)
++#define IMX363_REG_FINE_INTEG_TIME                CCI_REG8(0x0200)
++#define IMX363_REG_PLL_IVT_MPY                    CCI_REG16(0x0306)
++#define IMX363_REG_PLL_IOP_MPY                    CCI_REG16(0x030e)
++#define IMX363_REG_REQ_LINK_BIT_RATE_MBPS_H       CCI_REG16(0x0820)
++#define IMX363_REG_REQ_LINK_BIT_RATE_MBPS_L       CCI_REG16(0x0822)
++
++struct imx363_reg_list {
++	u32 num_of_regs;
++	const struct cci_reg_sequence *regs;
++};
++
++struct imx363_link_cfg {
++	unsigned int lf_to_pix_rate_factor;
++	struct imx363_reg_list reg_list;
++};
++
++enum {
++	IMX363_2_LANE_MODE,
++	IMX363_4_LANE_MODE,
++	IMX363_LANE_CONFIGS,
++};
++
++/* Link frequency config */
++struct imx363_link_freq_config {
++	u32 pixels_per_line;
++
++	/* Configuration for this link frequency / num lanes selection */
++	struct imx363_link_cfg link_cfg[IMX363_LANE_CONFIGS];
++};
++
++/* Mode : resolution and related config&values */
++struct imx363_mode {
++	/* Frame width */
++	u32 width;
++	/* Frame height */
++	u32 height;
++
++	/* V-timing */
++	u32 vts_def;
++	u32 vts_min;
++
++	/* Index of Link frequency config to be used */
++	u32 link_freq_index;
++	/* Default register values */
++	struct imx363_reg_list reg_list;
++
++	/* Analog crop rectangle */
++	struct v4l2_rect crop;
++};
++
++static const struct cci_reg_sequence mipi_2300mbps_24mhz_2l[] = {
++	{ IMX363_REG_EXCK_FREQ, 0x1800 },
++	{ IMX363_REG_IVTPXCK_DIV, 10 },
++	{ IMX363_REG_IVTSYCK_DIV, 2 },
++	{ IMX363_REG_PREPLLCK_VT_DIV, 4 },
++	{ IMX363_REG_PLL_IVT_MPY, 212 },
++	{ IMX363_REG_IOPPXCK_DIV, 10 },
++	{ IMX363_REG_IOPSYCK_DIV, 1 },
++	{ IMX363_REG_PREPLLCK_OP_DIV, 2 },
++	{ IMX363_REG_PLL_IOP_MPY, 216 },
++	{ IMX363_REG_PLL_MULT_DRIV, 0 },
++
++	{ IMX363_REG_CSI_LANE_MODE, 1 },
++};
++
++static const struct cci_reg_sequence mipi_2300mbps_24mhz_4l[] = {
++	{ IMX363_REG_EXCK_FREQ, 0x1800 },
++	{ IMX363_REG_IVTPXCK_DIV, 3 },
++	{ IMX363_REG_IVTSYCK_DIV, 2 },
++	{ IMX363_REG_PREPLLCK_VT_DIV, 4 },
++	{ IMX363_REG_PLL_IVT_MPY, 208 },
++	{ IMX363_REG_IOPPXCK_DIV, 10 },
++	{ IMX363_REG_IOPSYCK_DIV, 1 },
++	{ IMX363_REG_PREPLLCK_OP_DIV, 4 },
++	{ IMX363_REG_PLL_IOP_MPY, 230 },
++	{ IMX363_REG_PLL_MULT_DRIV, 1 },
++
++	{ IMX363_REG_CSI_LANE_MODE, 3 },
++	// { IMX363_REG_REQ_LINK_BIT_RATE_MBPS_H, 2300 * 4 },
++	// { IMX363_REG_REQ_LINK_BIT_RATE_MBPS_L, 0 },
++};
++
++static const struct cci_reg_sequence mipi_642mbps_24mhz_2l[] = {
++	{ IMX363_REG_EXCK_FREQ, 0x1800 },
++	{ IMX363_REG_IVTPXCK_DIV, 5 },
++	{ IMX363_REG_IVTSYCK_DIV, 2 },
++	{ IMX363_REG_PREPLLCK_VT_DIV, 4 },
++	{ IMX363_REG_PLL_IVT_MPY, 107 },
++	{ IMX363_REG_IOPPXCK_DIV, 10 },
++	{ IMX363_REG_IOPSYCK_DIV, 1 },
++	{ IMX363_REG_PREPLLCK_OP_DIV, 2 },
++	{ IMX363_REG_PLL_IOP_MPY, 216 },
++	{ IMX363_REG_PLL_MULT_DRIV, 0 },
++
++	{ IMX363_REG_CSI_LANE_MODE, 1 },
++	{ IMX363_REG_REQ_LINK_BIT_RATE_MBPS_H, 642 * 2 },
++	{ IMX363_REG_REQ_LINK_BIT_RATE_MBPS_L, 0 },
++};
++
++static const struct cci_reg_sequence mipi_642mbps_24mhz_4l[] = {
++	{ IMX363_REG_EXCK_FREQ, 0x1800 },
++	{ IMX363_REG_IVTPXCK_DIV, 5 },
++	{ IMX363_REG_IVTSYCK_DIV, 2 },
++	{ IMX363_REG_PREPLLCK_VT_DIV, 4 },
++	{ IMX363_REG_PLL_IVT_MPY, 107 },
++	{ IMX363_REG_IOPPXCK_DIV, 10 },
++	{ IMX363_REG_IOPSYCK_DIV, 1 },
++	{ IMX363_REG_PREPLLCK_OP_DIV, 2 },
++	{ IMX363_REG_PLL_IOP_MPY, 216 },
++	{ IMX363_REG_PLL_MULT_DRIV, 0 },
++
++	{ IMX363_REG_CSI_LANE_MODE, 3 },
++	{ IMX363_REG_REQ_LINK_BIT_RATE_MBPS_H, 642 * 4 },
++	{ IMX363_REG_REQ_LINK_BIT_RATE_MBPS_L, 0 },
++};
++
++static const struct cci_reg_sequence mode_common_regs[] = {
++	//Magical IMX363 Regs & Values - Found in downstream. Doesnt affect output except for the few noted. So disable.
++	// { CCI_REG8(0x31a3), 0x00 },
++	// { CCI_REG8(0x64d4), 0x01 },
++	// { CCI_REG8(0x64d5), 0xaa },
++	// { CCI_REG8(0x64d6), 0x01 },
++	// { CCI_REG8(0x64d7), 0xa9 },
++	// { CCI_REG8(0x64d8), 0x01 },
++	// { CCI_REG8(0x64d9), 0xa5 },
++	// { CCI_REG8(0x64da), 0x01 },
++	// { CCI_REG8(0x64db), 0xa1 },
++	// { CCI_REG8(0x720a), 0x24 },
++	// { CCI_REG8(0x720b), 0x89 },
++	// { CCI_REG8(0x720c), 0x85 },
++	// { CCI_REG8(0x720d), 0xa1 },
++	// { CCI_REG8(0x720e), 0x6e },
++	// { CCI_REG8(0x729c), 0x59 },
++	// { CCI_REG8(0x817c), 0xff },
++	// { CCI_REG8(0x817d), 0x80 },
++	// { CCI_REG8(0x9348), 0x96 },
++	// { CCI_REG8(0x934b), 0x8c },
++	// { CCI_REG8(0x934c), 0x82 },
++	// { CCI_REG8(0x9353), 0xaa },
++	// { CCI_REG8(0x9354), 0xaa },
++	// { CCI_REG8(0x30F4), 0x02 },
++	// { CCI_REG8(0x30F5), 0x80 },
++	// { CCI_REG8(0x31A5), 0x00 }, //causes white output
++	// { CCI_REG8(0x31A6), 0x00 }, //causes white output
++	// { CCI_REG8(0x560F), 0xBE }, //causes cropped corrupted nonsensical output
++	// { CCI_REG8(0x5856), 0x08 },
++	// { CCI_REG8(0x58D0), 0x10 },
++	// { CCI_REG8(0x734A), 0x01 },
++	// { CCI_REG8(0x734F), 0x2B },
++	// { CCI_REG8(0x7441), 0x55 },
++	// { CCI_REG8(0x7914), 0x03 },
++	// { CCI_REG8(0x7928), 0x04 },
++	// { CCI_REG8(0x7929), 0x04 },
++	// { CCI_REG8(0x793F), 0x03 },
++
++	// present in imx258. not present in android downstream logs. doesnt seem to affect output.
++	// {IMX363_REG_SCALE_MODE_EXT, 0},
++	// {IMX363_REG_SCALE_M_EXT, 16},
++	// {IMX363_REG_FORCE_FD_SUM, 1},
++	// {IMX363_REG_FRM_LENGTH_CTL, 0},
++	// {IMX363_REG_ANALOG_GAIN, 0},
++	// {IMX363_REG_GR_DIGITAL_GAIN, 256},
++	// {IMX363_REG_R_DIGITAL_GAIN, 256},
++	// {IMX363_REG_B_DIGITAL_GAIN, 256},
++	// {IMX363_REG_GB_DIGITAL_GAIN, 256},
++	// {IMX363_REG_AF_WINDOW_MODE, 0},
++	// {IMX363_REG_PHASE_PIX_OUTEN, 0},
++	// {IMX363_REG_PDPIX_DATA_RATE, 0},
++	// {IMX363_REG_HDR, 0},
++
++	// Seems important. Probably will work even without specifying these. But let's just set it anyway.
++	// {IMX363_REG_CSI_DT_FMT, 0x0a0a},
++	// {IMX363_REG_LINE_LENGTH_PCK, IMX363_PPL_DEFAULT},
++	{CCI_REG8(0x0136), 0x18},
++	{CCI_REG8(0x0137), 0x00},
++	{CCI_REG8(0x31A3), 0x00},
++	{CCI_REG8(0x64D4), 0x01},
++	{CCI_REG8(0x64D5), 0xAA},
++	{CCI_REG8(0x64D6), 0x01},
++	{CCI_REG8(0x64D7), 0xA9},
++	{CCI_REG8(0x64D8), 0x01},
++	{CCI_REG8(0x64D9), 0xA5},
++	{CCI_REG8(0x64DA), 0x01},
++	{CCI_REG8(0x64DB), 0xA1},
++	{CCI_REG8(0x720A), 0x24},
++	{CCI_REG8(0x720B), 0x89},
++	{CCI_REG8(0x720C), 0x85},
++	{CCI_REG8(0x720D), 0xA1},
++	{CCI_REG8(0x720E), 0x6E},
++	{CCI_REG8(0x729C), 0x59},
++	{CCI_REG8(0x817C), 0xFF},
++	{CCI_REG8(0x817D), 0x80},
++	{CCI_REG8(0x9348), 0x96},
++	{CCI_REG8(0x934B), 0x8C},
++	{CCI_REG8(0x934C), 0x82},
++	{CCI_REG8(0x9353), 0xAA},
++	{CCI_REG8(0x9354), 0xAA},
++	{CCI_REG8(0x4073), 0x30},
++};
++
++static const struct cci_reg_sequence mode_4032x3024_regs[] = {
++	// {IMX363_REG_BINNING_MODE, 0},
++	// {IMX363_REG_BINNING_TYPE_V, 0x11},
++	// // {IMX363_REG_SCALE_MODE, 1},
++	// // {IMX363_REG_SCALE_M, 64},
++	// {IMX363_REG_X_ADD_STA, 0}, // analog cropping
++	// {IMX363_REG_Y_ADD_STA, 0},
++	// {IMX363_REG_X_ADD_END, 4031},
++	// {IMX363_REG_Y_ADD_END, 3023},
++	// {IMX363_REG_X_EVN_INC, 1}, //subsampling
++	// {IMX363_REG_X_ODD_INC, 1},
++	// {IMX363_REG_Y_EVN_INC, 1},
++	// {IMX363_REG_Y_ODD_INC, 1},
++	// {IMX363_REG_DIG_CROP_X_OFFSET, 0}, // digital cropping
++	// {IMX363_REG_DIG_CROP_Y_OFFSET, 0},
++	// {IMX363_REG_DIG_CROP_IMAGE_WIDTH, 4032},
++	// {IMX363_REG_DIG_CROP_IMAGE_HEIGHT, 3024},
++	// {IMX363_REG_X_OUT_SIZE, 4032},
++	// {IMX363_REG_Y_OUT_SIZE, 3024},
++	// {IMX363_REG_FRM_LENGTH_LINES, IMX363_VTS_30FPS},
++	{CCI_REG8(0x0112), 0x0A},
++	{CCI_REG8(0x0113), 0x0A},
++	{CCI_REG8(0x0114), 0x03},
++	{CCI_REG8(0x0220), 0x00},
++	{CCI_REG8(0x0221), 0x11},
++	{CCI_REG8(0x0340), 0x0C},
++	{CCI_REG8(0x0341), 0x62},
++	{CCI_REG8(0x0342), 0x22},
++	{CCI_REG8(0x0343), 0x80},
++	{CCI_REG8(0x0381), 0x01},
++	{CCI_REG8(0x0383), 0x01},
++	{CCI_REG8(0x0385), 0x01},
++	{CCI_REG8(0x0387), 0x01},
++	{CCI_REG8(0x0900), 0x00},
++	{CCI_REG8(0x0901), 0x11},
++	{CCI_REG8(0x30F4), 0x02},
++	{CCI_REG8(0x30F5), 0x80},
++	{CCI_REG8(0x30F6), 0x00},
++	{CCI_REG8(0x30F7), 0xc8},
++	{CCI_REG8(0x31A0), 0x00},
++	{CCI_REG8(0x31A5), 0x00},
++	{CCI_REG8(0x31A6), 0x00},
++	{CCI_REG8(0x560F), 0xbe},
++	{CCI_REG8(0x5856), 0x08},
++	{CCI_REG8(0x58D0), 0x10},
++	{CCI_REG8(0x734A), 0x01},
++	{CCI_REG8(0x734F), 0x2b},
++	{CCI_REG8(0x7441), 0x55},
++	{CCI_REG8(0x7914), 0x03},
++	{CCI_REG8(0x7928), 0x04},
++	{CCI_REG8(0x7929), 0x04},
++	{CCI_REG8(0x793F), 0x03},
++	{CCI_REG8(0xBC7B), 0x18},
++	{CCI_REG8(0x0344), 0x00},
++	{CCI_REG8(0x0345), 0x00},
++	{CCI_REG8(0x0346), 0x00},
++	{CCI_REG8(0x0347), 0x00},
++	{CCI_REG8(0x0348), 0x0F},
++	{CCI_REG8(0x0349), 0xBF},
++	{CCI_REG8(0x034A), 0x0B},
++	{CCI_REG8(0x034B), 0xCF},
++	{CCI_REG8(0x034C), 0x0F},
++	{CCI_REG8(0x034D), 0xC0},
++	{CCI_REG8(0x034E), 0x0B},
++	{CCI_REG8(0x034F), 0xD0},
++	{CCI_REG8(0x0408), 0x00},
++	{CCI_REG8(0x0409), 0x00},
++	{CCI_REG8(0x040A), 0x00},
++	{CCI_REG8(0x040B), 0x00},
++	{CCI_REG8(0x040C), 0x0F},
++	{CCI_REG8(0x040D), 0xC0},
++	{CCI_REG8(0x040E), 0x0B},
++	{CCI_REG8(0x040F), 0xD0},
++	{CCI_REG8(0x0301), 0x03},
++	{CCI_REG8(0x0303), 0x02},

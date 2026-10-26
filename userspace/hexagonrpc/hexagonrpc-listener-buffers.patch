@@ -1,0 +1,303 @@
+diff -rN -U1 a/hexagonrpcd/interface/adsp_listener.c b/hexagonrpcd/interface/adsp_listener.c
+--- a/hexagonrpcd/interface/adsp_listener.c	2026-10-19 05:20:49.541027635 +0000
++++ b/hexagonrpcd/interface/adsp_listener.c	2026-10-19 05:43:37.158430378 +0000
+@@ -50 +50,13 @@
+ };
++
++static struct hrpc_arg_def_interp4 adsp_listener_get_in_bufs2_args[] = {
++	{ HRPC_ARG_WORD, sizeof(uint32_t) },
++	{ HRPC_ARG_WORD, sizeof(uint32_t) },
++	{ HRPC_ARG_OUT_BLOB, sizeof(uint32_t) },
++	{ HRPC_ARG_OUT_BLOB_SEQ, sizeof(char) },
++};
++const struct hrpc_method_def_interp4 adsp_listener_get_in_bufs2_def = {
++	.msg_id = 5,
++	.n_args = HRPC_ARRAY_SIZE(adsp_listener_get_in_bufs2_args),
++	.args = adsp_listener_get_in_bufs2_args,
++};
+diff -rN -U1 a/hexagonrpcd/interface/adsp_listener.h b/hexagonrpcd/interface/adsp_listener.h
+--- a/hexagonrpcd/interface/adsp_listener.h	2026-10-19 05:20:49.607029628 +0000
++++ b/hexagonrpcd/interface/adsp_listener.h	2026-10-19 05:43:37.158430378 +0000
+@@ -53,2 +53,10 @@
+ 
++extern struct hrpc_method_def_interp4 adsp_listener_get_in_bufs2_def;
++static inline int adsp_listener_get_in_bufs2(int fd, uint32_t ctx, uint32_t offset,
++					    uint32_t *required, uint32_t size, char *buf)
++{
++	return hexagonrpc(&adsp_listener_get_in_bufs2_def, fd, ADSP_LISTENER,
++			  ctx, offset, required, size, (void *)buf);
++}
++
+ #endif /* INTERFACE_ADSP_LISTENER_H */
+diff -rN -U1 a/hexagonrpcd/iobuffer.c b/hexagonrpcd/iobuffer.c
+--- a/hexagonrpcd/iobuffer.c	2026-10-19 05:20:49.967040502 +0000
++++ b/hexagonrpcd/iobuffer.c	2026-10-19 05:43:37.158430378 +0000
+@@ -22,2 +22,3 @@
+ #include <endian.h>
++#include <errno.h>
+ #include <libhexagonrpc/hexagonrpc.h>
+@@ -55,2 +56,10 @@
+ 		return 0;
++	if (ctx->size > FASTRPC_MAX_INBUF_SIZE - ctx->allocated) {
++		errno = E2BIG;
++		return -1;
++	}
++	if (!ctx->size) {
++		ctx->idx++;
++		return 0;
++	}
+ 
+@@ -62,2 +71,3 @@
+ 	ctx->inbufs[ctx->idx].p = buf;
++	ctx->allocated += ctx->size;
+ 
+@@ -144,4 +154,5 @@
+ 	ctx->align = 0;
++	ctx->allocated = 0;
+ 
+-	ctx->inbufs = malloc(sizeof(*ctx->inbufs) * ctx->n_inbufs);
++	ctx->inbufs = calloc(ctx->n_inbufs, sizeof(*ctx->inbufs));
+ 	if (ctx->inbufs == NULL && ctx->n_inbufs != 0)
+diff -rN -U1 a/hexagonrpcd/iobuffer.h b/hexagonrpcd/iobuffer.h
+--- a/hexagonrpcd/iobuffer.h	2026-10-19 05:20:50.033042495 +0000
++++ b/hexagonrpcd/iobuffer.h	2026-10-19 05:43:37.157430347 +0000
+@@ -33,2 +33,5 @@
+ 
++/* ponytail: 1 MiB per invocation; raise only for a measured larger request. */
++#define FASTRPC_MAX_INBUF_SIZE (1024U * 1024U)
++
+ struct fastrpc_decoder_context {
+@@ -43,2 +46,3 @@
+ 	unsigned int align;
++	size_t allocated;
+ };
+diff -rN -U1 a/hexagonrpcd/listener.c b/hexagonrpcd/listener.c
+--- a/hexagonrpcd/listener.c	2026-10-19 05:20:50.103044610 +0000
++++ b/hexagonrpcd/listener.c	2026-10-19 05:43:48.664778294 +0000
+@@ -21,2 +21,3 @@
+ 
++#include <errno.h>
+ #include <inttypes.h>
+@@ -27,2 +28,4 @@
+ #include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ 
+@@ -426,4 +429,4 @@
+ {
+-	struct fastrpc_decoder_context *ctx;
+-	char inbufs[256];
++	struct fastrpc_decoder_context *ctx = NULL;
++	char first[256], *inbufs = first;
+ 	char *outbufs = NULL;
+@@ -449,3 +452,3 @@
+ 				  rctx, handle, sc,
+-				  &inbufs_len, 256, inbufs);
++				  &inbufs_len, sizeof(first), first);
+ 	if (ret) {
+@@ -459,7 +462,30 @@
+ 
+-	if (inbufs_len > 256) {
+-		fprintf(stderr, "Large (>256B) input buffers aren't implemented\n");
+-		ret = -1;
++	if (inbufs_len > FASTRPC_MAX_INBUF_SIZE) {
++		fprintf(stderr, "FastRPC input size %u exceeds %u-byte limit\n",
++			inbufs_len, FASTRPC_MAX_INBUF_SIZE);
++		ret = -E2BIG;
+ 		goto err_free_outbufs;
+ 	}
++	if (inbufs_len > sizeof(first)) {
++		uint32_t required = 0;
++		inbufs = malloc(inbufs_len);
++		if (!inbufs) {
++			perror("Could not allocate FastRPC input");
++			ret = -ENOMEM;
++			goto err_free_outbufs;
++		}
++		memcpy(inbufs, first, sizeof(first));
++		ret = adsp_listener_get_in_bufs2(fd, *rctx, sizeof(first), &required,
++						inbufs_len - sizeof(first), inbufs + sizeof(first));
++		if (ret || required != inbufs_len) {
++			fprintf(stderr, "Could not fetch FastRPC input remainder: result %d, size %u/%u\n",
++				ret, required, inbufs_len);
++			if (!ret)
++				ret = -EPROTO;
++			goto err_free_outbufs;
++		}
++#ifdef HEXAGONRPC_VERBOSE
++		fprintf(stderr, "Fetched %u-byte FastRPC input\n", inbufs_len);
++#endif
++	}
+ 
+@@ -485,4 +511,9 @@
+ 	*decoded = inbuf_decode_finish(ctx);
++	ctx = NULL;
+ 
+ err_free_outbufs:
++	if (ctx)
++		iobuf_free(REMOTE_SCALARS_INBUFS(*sc), inbuf_decode_finish(ctx));
++	if (inbufs != first)
++		free(inbufs);
+ 	free(outbufs);
+diff -rN -U1 a/hexagonrpcd/rpcd.c b/hexagonrpcd/rpcd.c
+--- a/hexagonrpcd/rpcd.c	2026-10-19 05:20:50.439054759 +0000
++++ b/hexagonrpcd/rpcd.c	2026-10-19 05:43:48.665778324 +0000
+@@ -190,3 +190,3 @@
+ 
+-static void *start_reverse_tunnel(int fd, const char *device_dir, const char *dsp)
++static int start_reverse_tunnel(int fd, const char *device_dir, const char *dsp)
+ {
+@@ -199,3 +199,3 @@
+ 	if (ifaces == NULL)
+-		return NULL;
++		return -ENOMEM;
+ 
+@@ -218,3 +218,3 @@
+ 
+-	run_fastrpc_listener(fd, n_ifaces, ifaces);
++	ret = run_fastrpc_listener(fd, n_ifaces, ifaces);
+ 
+@@ -224,3 +224,3 @@
+ 
+-	return NULL;
++	return ret;
+ 
+@@ -229,3 +229,3 @@
+ 
+-	return NULL;
++	return ret;
+ }
+@@ -440,3 +440,3 @@
+ 
+-	start_reverse_tunnel(fd, device_dir, dsp);
++	ret = start_reverse_tunnel(fd, device_dir, dsp);
+ 
+@@ -445,2 +445,4 @@
+ 	close(fd);
++	if (ret)
++		goto err_free_pids;
+ free_pids:
+diff -rN -U1 a/tests/test_listener_input.c b/tests/test_listener_input.c
+--- a/tests/test_listener_input.c	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/test_listener_input.c	2026-10-19 05:45:46.719577352 +0000
+@@ -0,0 +1,120 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later */
++#include <assert.h>
++#include <stdarg.h>
++#include <sys/ioctl.h>
++#include <misc/fastrpc.h>
++#include "../hexagonrpcd/listener.c"
++
++static char *wire;
++static uint32_t wire_len, reported, fetches;
++static int failure, mismatch, next_failure;
++
++/* Only the kernel transport is substituted; receive and RPC encoding are real. */
++#ifdef __GLIBC__
++int ioctl(int fd, unsigned long op, ...)
++#else
++int ioctl(int fd, int op, ...)
++#endif
++{
++	va_list ap;
++	struct fastrpc_invoke *invoke;
++	struct fastrpc_invoke_args *args;
++	uint32_t cap, offset, *in, *out;
++	char *buf;
++	assert(op == FASTRPC_IOCTL_INVOKE);
++	va_start(ap, op);
++	invoke = va_arg(ap, struct fastrpc_invoke *);
++	va_end(ap);
++	assert(invoke->handle == ADSP_LISTENER);
++	if (invoke->sc == REMOTE_SCALARS_MAKE(3, 0, 0))
++		return 0;
++	args = (void *)(uintptr_t)invoke->args;
++	in = (void *)(uintptr_t)args[0].ptr;
++	if (REMOTE_SCALARS_METHOD(invoke->sc) == 4) {
++		assert(invoke->sc == REMOTE_SCALARS_MAKE(4, 2, 2));
++		assert(args[0].length == 16 && args[1].length == 0 && args[2].length == 16);
++		cap = in[3];
++		out = (void *)(uintptr_t)args[2].ptr;
++		out[0] = 73; out[1] = 1; out[2] = REMOTE_SCALARS_MAKE(5, 2, 1);
++		out[3] = reported;
++		buf = (void *)(uintptr_t)args[3].ptr;
++		assert(cap == 256 && args[3].length == cap);
++		memcpy(buf, wire, wire_len < cap ? wire_len : cap);
++		return next_failure;
++	}
++	assert(invoke->sc == REMOTE_SCALARS_MAKE(5, 1, 2));
++	assert(args[0].length == 12 && args[1].length == 4);
++	assert(in[0] == 73);
++	offset = in[1]; cap = in[2];
++	out = (void *)(uintptr_t)args[1].ptr;
++	buf = (void *)(uintptr_t)args[2].ptr;
++	assert(offset == 256 && cap == wire_len - offset && args[2].length == cap);
++	fetches++;
++	*out = reported + mismatch;
++	memcpy(buf, wire + offset, cap);
++	return failure;
++}
++
++static int receive(struct fastrpc_io_buffer **decoded)
++{
++	uint32_t ctx = 0, handle = 0, sc = 0;
++	return return_for_next_invoke(-1, 0, &ctx, &handle, &sc, NULL, decoded);
++}
++
++static void fixture(size_t size)
++{
++	uint32_t prim[] = {7, size};
++	char *payload = malloc(size ? size : 1);
++	assert(payload);
++	for (size_t i = 0; i < size; i++)
++		payload[i] = i % 251;
++	struct fastrpc_io_buffer in[] = {{sizeof(prim), prim}, {size, payload}};
++	wire_len = outbufs_calculate_size(2, in);
++	wire = malloc(wire_len);
++	assert(wire);
++	outbufs_encode(2, in, wire);
++	free(payload);
++	reported = wire_len;
++	failure = mismatch = next_failure = fetches = 0;
++}
++
++int main(void)
++{
++	const size_t sizes[] = {0, 1, 232, 233, 512, 65536, FASTRPC_MAX_INBUF_SIZE - 24};
++	struct fastrpc_io_buffer *decoded;
++	for (size_t n = 0; n < sizeof(sizes) / sizeof(*sizes); n++) {
++		fixture(sizes[n]);
++		assert(receive(&decoded) == 0);
++		assert(fetches == (wire_len > 256));
++		assert(decoded[0].s == 8 && ((uint32_t *)decoded[0].p)[0] == 7);
++		assert(decoded[1].s == sizes[n]);
++		for (size_t i = 0; i < sizes[n]; i++)
++			assert(((unsigned char *)decoded[1].p)[i] == i % 251);
++		iobuf_free(2, decoded);
++		free(wire);
++	}
++	fixture(512);
++	reported = FASTRPC_MAX_INBUF_SIZE + 1;
++	assert(receive(&decoded) == -E2BIG && !fetches);
++	reported = wire_len;
++	mismatch = 1;
++	assert(receive(&decoded) == -EPROTO);
++	mismatch = -1;
++	assert(receive(&decoded) == -EPROTO);
++	mismatch = 0;
++	failure = -EIO;
++	assert(receive(&decoded) == -EIO);
++	failure = 0;
++	/* A malicious inner length cannot bypass the aggregate allocation ceiling. */
++	memset(wire, 0xff, 4);
++	assert(receive(&decoded) != 0 && errno == E2BIG);
++	free(wire);
++	fixture(1);
++	reported = 1;
++	assert(receive(&decoded) != 0);
++	next_failure = -EIO;
++	assert(run_fastrpc_listener(-1, 0, NULL) == -EIO);
++	free(wire);
++	puts("listener small/large/limit/decode/transport guards passed");
++	return 0;
++}

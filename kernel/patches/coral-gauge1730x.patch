@@ -1,0 +1,166 @@
+diff --git a/drivers/power/supply/max1720x_battery.c b/drivers/power/supply/max1720x_battery.c
+index e2bd54ee3..6400ea59e 100644
+--- a/drivers/power/supply/max1720x_battery.c
++++ b/drivers/power/supply/max1720x_battery.c
+@@ -12,6 +12,7 @@
+ #include <linux/module.h>
+ #include <linux/nvmem-provider.h>
+ #include <linux/power_supply.h>
++#include <linux/property.h>
+ #include <linux/regmap.h>
+ 
+ #include <linux/unaligned.h>
+@@ -63,6 +64,7 @@ struct max1720x_device_info {
+ 	struct regmap *regmap_nv;
+ 	struct i2c_client *ancillary;
+ 	int rsense;
++	bool max1730x;
+ };
+ 
+ /*
+@@ -358,16 +360,40 @@ static int max172xx_battery_health(struct max1720x_device_info *info,
+ 	return 0;
+ }
+ 
++/* Google coral 4.14 max1730x register map; the common m5 registers stay put.
++ * This only changes volatile telemetry. No reset, NV override or flash writes.
++ */
++static int max1720x_read(struct max1720x_device_info *info, unsigned int reg,
++			unsigned int *val)
++{
++	if (info->max1730x) {
++		switch (reg) {
++		case MAX172XX_BATT: reg = 0x1a; break;
++		case MAX172XX_TEMP: reg = 0x1b; break;
++		case MAX172XX_CURRENT: reg = 0x1c; break;
++		case MAX172XX_AVG_CURRENT: reg = 0x1d; break;
++		}
++	}
++	return regmap_read(info->regmap, reg, val);
++}
++
+ static int max1720x_battery_get_property(struct power_supply *psy,
+ 					 enum power_supply_property psp,
+ 					 union power_supply_propval *val)
+ {
+ 	struct max1720x_device_info *info = power_supply_get_drvdata(psy);
+-	unsigned int reg_val;
++	unsigned int reg_val = 0;
+ 	int ret = 0;
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_HEALTH:
++		/* MAX1730x protection status differs; never clear 1720x alert bits.
++		 * UNKNOWN keeps charging policy from treating this as safety proof.
++		 */
++		if (info->max1730x) {
++			val->intval = POWER_SUPPLY_HEALTH_UNKNOWN;
++			break;
++		}
+ 		ret = max172xx_battery_health(info, &reg_val);
+ 		val->intval = reg_val;
+ 		break;
+@@ -377,7 +403,7 @@ static int max1720x_battery_get_property(struct power_supply *psy,
+ 		 * sysfs interface. Value return 0 if battery not
+ 		 * present or unaccesable via I2c.
+ 		 */
+-		ret = regmap_read(info->regmap, MAX172XX_STATUS, &reg_val);
++		ret = max1720x_read(info, MAX172XX_STATUS, &reg_val);
+ 		if (ret < 0) {
+ 			val->intval = 0;
+ 			return 0;
+@@ -386,47 +412,51 @@ static int max1720x_battery_get_property(struct power_supply *psy,
+ 		val->intval = !FIELD_GET(MAX172XX_STATUS_BAT_ABSENT, reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CAPACITY:
+-		ret = regmap_read(info->regmap, MAX172XX_REPSOC, &reg_val);
++		ret = max1720x_read(info, MAX172XX_REPSOC, &reg_val);
+ 		val->intval = max172xx_percent_to_ps(reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+-		ret = regmap_read(info->regmap, MAX172XX_BATT, &reg_val);
++		ret = max1720x_read(info, MAX172XX_BATT, &reg_val);
+ 		val->intval = max172xx_voltage_to_ps(reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+-		ret = regmap_read(info->regmap, MAX172XX_DESIGN_CAP, &reg_val);
++		ret = max1720x_read(info, MAX172XX_DESIGN_CAP, &reg_val);
+ 		val->intval = max172xx_capacity_to_ps(reg_val, info);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_AVG:
+-		ret = regmap_read(info->regmap, MAX172XX_REPCAP, &reg_val);
++		ret = max1720x_read(info, MAX172XX_REPCAP, &reg_val);
+ 		val->intval = max172xx_capacity_to_ps(reg_val, info);
+ 		break;
+ 	case POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG:
+-		ret = regmap_read(info->regmap, MAX172XX_TTE, &reg_val);
++		ret = max1720x_read(info, MAX172XX_TTE, &reg_val);
+ 		val->intval = max172xx_time_to_ps(reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_TIME_TO_FULL_AVG:
+-		ret = regmap_read(info->regmap, MAX172XX_TTF, &reg_val);
++		ret = max1720x_read(info, MAX172XX_TTF, &reg_val);
+ 		val->intval = max172xx_time_to_ps(reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_TEMP:
+-		ret = regmap_read(info->regmap, MAX172XX_TEMP, &reg_val);
++		ret = max1720x_read(info, MAX172XX_TEMP, &reg_val);
+ 		val->intval = max172xx_temperature_to_ps(reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CURRENT_NOW:
+-		ret = regmap_read(info->regmap, MAX172XX_CURRENT, &reg_val);
++		ret = max1720x_read(info, MAX172XX_CURRENT, &reg_val);
+ 		val->intval = max172xx_current_to_voltage(reg_val) / info->rsense;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CURRENT_AVG:
+-		ret = regmap_read(info->regmap, MAX172XX_AVG_CURRENT, &reg_val);
++		ret = max1720x_read(info, MAX172XX_AVG_CURRENT, &reg_val);
+ 		val->intval = max172xx_current_to_voltage(reg_val) / info->rsense;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_FULL:
+-		ret = regmap_read(info->regmap, MAX172XX_FULL_CAP, &reg_val);
++		ret = max1720x_read(info, MAX172XX_FULL_CAP, &reg_val);
+ 		val->intval = max172xx_capacity_to_ps(reg_val, info);
+ 		break;
+ 	case POWER_SUPPLY_PROP_MODEL_NAME:
+-		ret = regmap_read(info->regmap, MAX172XX_DEV_NAME, &reg_val);
++		if (info->max1730x) {
++			val->strval = "MAX17301";
++			break;
++		}
++		ret = max1720x_read(info, MAX172XX_DEV_NAME, &reg_val);
+ 		if (ret)
+ 			return ret;
+ 		reg_val = FIELD_GET(MAX172XX_DEV_NAME_TYPE_MASK, reg_val);
+@@ -587,6 +617,7 @@ static int max1720x_probe(struct i2c_client *client)
+ 	struct device *dev = &client->dev;
+ 	struct max1720x_device_info *info;
+ 	struct power_supply *bat;
++	unsigned int id;
+ 	int ret;
+ 
+ 	info = devm_kzalloc(dev, sizeof(*info), GFP_KERNEL);
+@@ -602,6 +633,15 @@ static int max1720x_probe(struct i2c_client *client)
+ 		return dev_err_probe(dev, PTR_ERR(info->regmap),
+ 				     "regmap initialization failed\n");
+ 
++	ret = regmap_read(info->regmap, MAX172XX_DEV_NAME, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to read gauge identity\n");
++	info->max1730x = (id >> 4) >= 0x404 && (id >> 4) <= 0x406;
++	if (device_is_compatible(dev, "maxim,max17301") && !info->max1730x)
++		return dev_err_probe(dev, -ENODEV, "MAX17301 identity mismatch\n");
++	if (info->max1730x)
++		psy_cfg.attr_grp = NULL; /* 1720x ancillary temperature map differs. */
++
+ 	ret = max1720x_probe_nvmem(client, info);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "Failed to probe nvmem\n");
+@@ -616,6 +656,7 @@ static int max1720x_probe(struct i2c_client *client)
+ 
+ static const struct of_device_id max1720x_of_match[] = {
+ 	{ .compatible = "maxim,max17201" },
++	{ .compatible = "maxim,max17301" },
+ 	{}
+ };
+ MODULE_DEVICE_TABLE(of, max1720x_of_match);

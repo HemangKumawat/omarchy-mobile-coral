@@ -1,0 +1,96 @@
+diff --git a/drivers/clk/qcom/dispcc-sm8250.c b/drivers/clk/qcom/dispcc-sm8250.c
+index 8f433e1e7..e9630b721 100644
+--- a/drivers/clk/qcom/dispcc-sm8250.c
++++ b/drivers/clk/qcom/dispcc-sm8250.c
+@@ -562,46 +562,50 @@ static struct clk_rcg2 disp_cc_mdss_mdp_clk_src = {
+ 	.freq_tbl = ftbl_disp_cc_mdss_mdp_clk_src,
+ 	.clkr.hw.init = &(const struct clk_init_data) {
+ 		.name = "disp_cc_mdss_mdp_clk_src",
+ 		.parent_data = disp_cc_parent_data_5,
+ 		.num_parents = ARRAY_SIZE(disp_cc_parent_data_5),
+ 		.flags = CLK_SET_RATE_PARENT,
+ 		.ops = &clk_rcg2_shared_ops,
+ 	},
+ };
+ 
++static struct clk_init_data disp_cc_mdss_pclk0_init = {
++	.name = "disp_cc_mdss_pclk0_clk_src",
++	.parent_data = disp_cc_parent_data_6,
++	.num_parents = ARRAY_SIZE(disp_cc_parent_data_6),
++	.flags = CLK_SET_RATE_PARENT,
++	.ops = &clk_pixel_ops,
++};
++
+ static struct clk_rcg2 disp_cc_mdss_pclk0_clk_src = {
+ 	.cmd_rcgr = 0x2098,
+ 	.mnd_width = 8,
+ 	.hid_width = 5,
+ 	.parent_map = disp_cc_parent_map_6,
+-	.clkr.hw.init = &(const struct clk_init_data) {
+-		.name = "disp_cc_mdss_pclk0_clk_src",
+-		.parent_data = disp_cc_parent_data_6,
+-		.num_parents = ARRAY_SIZE(disp_cc_parent_data_6),
+-		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_pixel_ops,
+-	},
++	.clkr.hw.init = &disp_cc_mdss_pclk0_init,
++};
++
++static struct clk_init_data disp_cc_mdss_pclk1_init = {
++	.name = "disp_cc_mdss_pclk1_clk_src",
++	.parent_data = disp_cc_parent_data_6,
++	.num_parents = ARRAY_SIZE(disp_cc_parent_data_6),
++	.flags = CLK_SET_RATE_PARENT,
++	.ops = &clk_pixel_ops,
+ };
+ 
+ static struct clk_rcg2 disp_cc_mdss_pclk1_clk_src = {
+ 	.cmd_rcgr = 0x20b0,
+ 	.mnd_width = 8,
+ 	.hid_width = 5,
+ 	.parent_map = disp_cc_parent_map_6,
+-	.clkr.hw.init = &(const struct clk_init_data) {
+-		.name = "disp_cc_mdss_pclk1_clk_src",
+-		.parent_data = disp_cc_parent_data_6,
+-		.num_parents = ARRAY_SIZE(disp_cc_parent_data_6),
+-		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_pixel_ops,
+-	},
++	.clkr.hw.init = &disp_cc_mdss_pclk1_init,
+ };
+ 
+ static const struct freq_tbl ftbl_disp_cc_mdss_rot_clk_src[] = {
+ 	F(19200000, P_BI_TCXO, 1, 0, 0),
+ 	F(200000000, P_DISP_CC_PLL1_OUT_MAIN, 3, 0, 0),
+ 	F(300000000, P_DISP_CC_PLL1_OUT_MAIN, 2, 0, 0),
+ 	F(345000000, P_DISP_CC_PLL0_OUT_MAIN, 4, 0, 0),
+ 	F(460000000, P_DISP_CC_PLL0_OUT_MAIN, 3, 0, 0),
+ 	{ }
+ };
+@@ -1264,20 +1268,26 @@ static int disp_cc_sm8250_probe(struct platform_device *pdev)
+ 	ret = pm_runtime_resume_and_get(&pdev->dev);
+ 	if (ret)
+ 		return ret;
+ 
+ 	regmap = qcom_cc_map(pdev, &disp_cc_sm8250_desc);
+ 	if (IS_ERR(regmap)) {
+ 		pm_runtime_put(&pdev->dev);
+ 		return PTR_ERR(regmap);
+ 	}
+ 
++	/* Initial pixel RCG updates need an enabled DSI PLL parent on SM8150. */
++	if (of_device_is_compatible(pdev->dev.of_node, "qcom,sm8150-dispcc")) {
++		disp_cc_mdss_pclk0_init.flags |= CLK_OPS_PARENT_ENABLE;
++		disp_cc_mdss_pclk1_init.flags |= CLK_OPS_PARENT_ENABLE;
++	}
++
+ 	/* Apply differences for SM8150 and SM8350 */
+ 	BUILD_BUG_ON(CLK_ALPHA_PLL_TYPE_TRION != CLK_ALPHA_PLL_TYPE_LUCID);
+ 	if (of_device_is_compatible(pdev->dev.of_node, "qcom,sc8180x-dispcc") ||
+ 	    of_device_is_compatible(pdev->dev.of_node, "qcom,sm8150-dispcc")) {
+ 		disp_cc_pll0_config.config_ctl_hi_val = 0x00002267;
+ 		disp_cc_pll0_config.config_ctl_hi1_val = 0x00000024;
+ 		disp_cc_pll0_config.user_ctl_hi1_val = 0x000000D0;
+ 		disp_cc_pll0_init.ops = &clk_alpha_pll_trion_ops;
+ 		disp_cc_pll1_config.config_ctl_hi_val = 0x00002267;
+ 		disp_cc_pll1_config.config_ctl_hi1_val = 0x00000024;

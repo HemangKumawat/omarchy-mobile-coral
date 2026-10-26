@@ -1,0 +1,459 @@
+diff -rN -U0 a/hexagonrpcd/apps_std.c b/hexagonrpcd/apps_std.c
+--- a/hexagonrpcd/apps_std.c	2026-10-19 05:20:48.786004830 +0000
++++ b/hexagonrpcd/apps_std.c	2026-10-19 05:39:30.217962415 +0000
+@@ -22,0 +23 @@
++#include <fcntl.h>
+@@ -122,0 +124,37 @@
++static uint32_t apps_std_fwrite(void *data,
++				const struct fastrpc_io_buffer *inbufs,
++				struct fastrpc_io_buffer *outbufs)
++{
++	struct apps_std_ctx *ctx = data;
++	const uint32_t *first_in = inbufs[0].p;
++	uint32_t *first_out = outbufs[0].p;
++	ssize_t ret = hexagonfs_write(ctx->fds, first_in[0], inbufs[1].s, inbufs[1].p);
++	if (ret < 0) {
++		fprintf(stderr, "Could not write registry: %s\n", strerror(-ret));
++		return AEE_EFAILED;
++	}
++	first_out[0] = ret;
++	first_out[1] = 0;
++	return 0;
++}
++
++static uint32_t apps_std_fremove(void *data,
++				 const struct fastrpc_io_buffer *inbufs,
++				 struct fastrpc_io_buffer *outbufs)
++{
++	struct apps_std_ctx *ctx = data;
++	const char *name = inbufs[1].p;
++	int ret;
++	if (!inbufs[1].s || !name || name[inbufs[1].s - 1] || !name[0])
++		return AEE_EBADPARM;
++#ifdef HEXAGONRPC_VERBOSE
++	fprintf(stderr, "remove(%s)\n", name);
++#endif
++	ret = hexagonfs_remove(ctx->fds, ctx->rootfd, ctx->rootfd, name);
++	if (ret) {
++		fprintf(stderr, "Could not remove %s: %s\n", name, strerror(-ret));
++		return AEE_EFAILED;
++	}
++	return 0;
++}
++
+@@ -159 +197,2 @@
+-	char rw_mode;
++	const char *mode;
++	int flags;
+@@ -163 +202,2 @@
+-	if (((const char *) inbufs[1].p)[inbufs[1].s - 1] != 0
++	if (!inbufs[1].s || !inbufs[3].s || !inbufs[4].s
++	 || ((const char *) inbufs[1].p)[inbufs[1].s - 1] != 0
+@@ -168,5 +208,8 @@
+-	rw_mode = ((const char *) inbufs[4].p)[0];
+-	if (rw_mode == 'w' || rw_mode == 'a') {
+-		fprintf(stderr, "Tried to open %s for writing\n",
+-				(const char *) inbufs[3].p);
+-		return AEE_EUNSUPPORTED;
++	mode = inbufs[4].p;
++	if (!mode[0] || strspn(mode, "rwa+b") != strlen(mode))
++		return AEE_EBADPARM;
++	switch (mode[0]) {
++	case 'r': flags = strchr(mode, '+') ? O_RDWR : O_RDONLY; break;
++	case 'w': flags = O_CREAT | O_TRUNC | (strchr(mode, '+') ? O_RDWR : O_WRONLY); break;
++	case 'a': flags = O_CREAT | O_APPEND | (strchr(mode, '+') ? O_RDWR : O_WRONLY); break;
++	default: return AEE_EBADPARM;
+@@ -191 +234 @@
+-	fd = hexagonfs_openat(ctx->fds, ctx->rootfd, dirfd, inbufs[3].p);
++	fd = hexagonfs_openat_flags(ctx->fds, ctx->rootfd, dirfd, inbufs[3].p, flags);
+@@ -202 +245 @@
+-					      rw_mode,
++					      mode[0],
+@@ -423 +466 @@
+-	{ .def = NULL, .impl = NULL, },
++	{ .def = &apps_std_fwrite_def, .impl = apps_std_fwrite, },
+@@ -448 +491 @@
+-	{ .def = NULL, .impl = NULL, },
++	{ .def = &apps_std_fremove_def, .impl = apps_std_fremove, },
+diff -rN -U0 a/hexagonrpcd/hexagonfs.c b/hexagonrpcd/hexagonfs.c
+--- a/hexagonrpcd/hexagonfs.c	2026-10-19 05:20:48.927009089 +0000
++++ b/hexagonrpcd/hexagonfs.c	2026-10-19 05:38:25.686010386 +0000
+@@ -22,0 +23 @@
++#include <fcntl.h>
+@@ -142 +143 @@
+-int hexagonfs_openat(struct hexagonfs_fd **fds, int rootfd, int dirfd, const char *name)
++int hexagonfs_openat_flags(struct hexagonfs_fd **fds, int rootfd, int dirfd, const char *name, int flags)
+@@ -172 +173 @@
+-			ret = fd->ops->openat(fd, segment, expect_dir, &fd);
++			ret = fd->ops->openat(fd, segment, expect_dir, *curr ? O_RDONLY : flags, &fd);
+@@ -190,0 +192,30 @@
++	return ret;
++}
++
++int hexagonfs_openat(struct hexagonfs_fd **fds, int rootfd, int dirfd, const char *name)
++{
++	return hexagonfs_openat_flags(fds, rootfd, dirfd, name, O_RDONLY);
++}
++
++ssize_t hexagonfs_write(struct hexagonfs_fd **fds, int fileno, size_t size, const void *ptr)
++{
++	if (fileno < 0 || fileno >= HEXAGONFS_MAX_FD || !fds[fileno])
++		return -EBADF;
++	if (!fds[fileno]->ops->write)
++		return -EROFS;
++	return fds[fileno]->ops->write(fds[fileno], size, ptr);
++}
++
++int hexagonfs_remove(struct hexagonfs_fd **fds, int rootfd, int dirfd, const char *name)
++{
++	const char *base = strrchr(name, '/');
++	int fd, ret;
++	base = base ? base + 1 : name;
++	if (!*base || !strcmp(base, ".") || !strcmp(base, ".."))
++		return -EINVAL;
++	/* Resolve the final file with the same tmpfs/no-symlink/no-mount guards. */
++	fd = hexagonfs_openat(fds, rootfd, dirfd, name);
++	if (fd < 0)
++		return fd;
++	ret = fds[fd]->ops->remove ? fds[fd]->ops->remove(fds[fd], base) : -EROFS;
++	hexagonfs_close(fds, fd);
+diff -rN -U0 a/hexagonrpcd/hexagonfs.h b/hexagonrpcd/hexagonfs.h
+--- a/hexagonrpcd/hexagonfs.h	2026-10-19 05:20:48.995011142 +0000
++++ b/hexagonrpcd/hexagonfs.h	2026-10-19 05:38:25.685010356 +0000
+@@ -39 +39 @@
+-		      bool expect_dir,
++		      bool expect_dir, int flags,
+@@ -42,0 +43,2 @@
++	ssize_t (*write)(struct hexagonfs_fd *fd, size_t size, const void *ptr);
++	int (*remove)(struct hexagonfs_fd *fd, const char *name);
+@@ -66,0 +69 @@
++extern struct hexagonfs_file_ops hexagonfs_registry_ops;
+@@ -73,0 +77,3 @@
++int hexagonfs_openat_flags(struct hexagonfs_fd **fds, int rootfd, int dirfd, const char *name, int flags);
++ssize_t hexagonfs_write(struct hexagonfs_fd **fds, int fileno, size_t size, const void *ptr);
++int hexagonfs_remove(struct hexagonfs_fd **fds, int rootfd, int dirfd, const char *name);
+diff -rN -U0 a/hexagonrpcd/hexagonfs_mapped.c b/hexagonrpcd/hexagonfs_mapped.c
+--- a/hexagonrpcd/hexagonfs_mapped.c	2026-10-19 05:20:49.075013559 +0000
++++ b/hexagonrpcd/hexagonfs_mapped.c	2026-10-19 05:40:24.471603371 +0000
+@@ -24,0 +25,4 @@
++#include <linux/magic.h>
++#include <linux/openat2.h>
++#include <sys/syscall.h>
++#include <sys/vfs.h>
+@@ -35,0 +40 @@
++	bool writable;
+@@ -70,0 +76 @@
++	ctx->writable = false;
+@@ -83 +89 @@
+-			 bool expect_dir,
++			 bool expect_dir, int flags,
+@@ -89 +94,0 @@
+-	int flags = O_RDONLY;
+@@ -91,0 +97,2 @@
++	if (flags != O_RDONLY && !dir_ctx->writable)
++		return -EROFS;
+@@ -105 +112,10 @@
+-	ctx->fd = openat(dir_ctx->fd, segment, flags);
++	if (dir_ctx->writable) {
++		struct open_how how = {
++			.flags = flags | O_NOFOLLOW,
++			.mode = (flags & O_CREAT) ? 0600 : 0,
++			.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV,
++		};
++		ctx->fd = syscall(SYS_openat2, dir_ctx->fd, segment, &how, sizeof(how));
++	} else {
++		ctx->fd = openat(dir_ctx->fd, segment, flags);
++	}
+@@ -111,0 +128 @@
++	ctx->writable = false;
+@@ -115 +132,2 @@
+-	fd->ops = &hexagonfs_mapped_ops;
++	ctx->writable = dir_ctx->writable;
++	fd->ops = ctx->writable ? &hexagonfs_registry_ops : &hexagonfs_mapped_ops;
+@@ -238 +256 @@
+-				  bool expect_dir,
++				  bool expect_dir, int flags,
+@@ -242 +260 @@
+-		return mapped_openat(dir, segment, expect_dir, out);
++		return mapped_openat(dir, segment, expect_dir, flags, out);
+@@ -323,0 +342,51 @@
++
++static int registry_from_dirent(const void *path, bool dir, void **fd_data)
++{
++	struct mapped_ctx *ctx;
++	struct statfs fs;
++	int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
++	if (fd < 0)
++		return -errno;
++	if (fstatfs(fd, &fs) || fs.f_type != TMPFS_MAGIC) {
++		close(fd);
++		return -EROFS;
++	}
++	ctx = calloc(1, sizeof(*ctx));
++	if (!ctx) {
++		close(fd);
++		return -ENOMEM;
++	}
++	ctx->fd = fd;
++	ctx->writable = true;
++	*fd_data = ctx;
++	return 0;
++}
++
++static ssize_t registry_write(struct hexagonfs_fd *fd, size_t size, const void *ptr)
++{
++	struct mapped_ctx *ctx = fd->data;
++	ssize_t ret = write(ctx->fd, ptr, size);
++	return ret < 0 ? -errno : ret;
++}
++
++static int registry_remove(struct hexagonfs_fd *fd, const char *name)
++{
++	struct mapped_ctx *parent;
++	if (!fd->up || fd->up->ops != &hexagonfs_registry_ops)
++		return -EROFS;
++	parent = fd->up->data;
++	/* unlinkat never follows a replaced final symlink; the parent is held open. */
++	return unlinkat(parent->fd, name, 0) < 0 ? -errno : 0;
++}
++
++struct hexagonfs_file_ops hexagonfs_registry_ops = {
++	.close = mapped_close,
++	.from_dirent = registry_from_dirent,
++	.openat = mapped_openat,
++	.read = mapped_read,
++	.write = registry_write,
++	.remove = registry_remove,
++	.readdir = mapped_readdir,
++	.seek = mapped_seek,
++	.stat = mapped_stat,
++};
+diff -rN -U0 a/hexagonrpcd/hexagonfs_plat_subtype_name.c b/hexagonrpcd/hexagonfs_plat_subtype_name.c
+--- a/hexagonrpcd/hexagonfs_plat_subtype_name.c	2026-10-19 05:20:49.140015522 +0000
++++ b/hexagonrpcd/hexagonfs_plat_subtype_name.c	2026-10-19 05:21:36.255504793 +0000
+@@ -70 +70 @@
+-			bool expect_dir,
++			bool expect_dir, int flags,
+diff -rN -U0 a/hexagonrpcd/hexagonfs_virt_dir.c b/hexagonrpcd/hexagonfs_virt_dir.c
+--- a/hexagonrpcd/hexagonfs_virt_dir.c	2026-10-19 05:20:49.207017546 +0000
++++ b/hexagonrpcd/hexagonfs_virt_dir.c	2026-10-19 05:21:36.256732401 +0000
+@@ -65 +65 @@
+-			   bool expect_dir,
++			   bool expect_dir, int flags,
+@@ -72,0 +73,2 @@
++	if (flags != 0)
++		return -EROFS;
+diff -rN -U0 a/hexagonrpcd/interface/apps_std.c b/hexagonrpcd/interface/apps_std.c
+--- a/hexagonrpcd/interface/apps_std.c	2026-10-19 05:20:49.821036092 +0000
++++ b/hexagonrpcd/interface/apps_std.c	2026-10-19 05:38:25.686010386 +0000
+@@ -77,0 +78,12 @@
++static struct hrpc_arg_def_interp4 apps_std_fwrite_args[] = {
++	{ HRPC_ARG_WORD, sizeof(uint32_t) },
++	{ HRPC_ARG_BLOB_SEQ, sizeof(char) },
++	{ HRPC_ARG_OUT_BLOB, sizeof(uint32_t) },
++	{ HRPC_ARG_OUT_BLOB, sizeof(uint32_t) },
++};
++const struct hrpc_method_def_interp4 apps_std_fwrite_def = {
++	.msg_id = 5,
++	.n_args = HRPC_ARRAY_SIZE(apps_std_fwrite_args),
++	.args = apps_std_fwrite_args,
++};
++
+@@ -105,0 +118,9 @@
++};
++
++static struct hrpc_arg_def_interp4 apps_std_fremove_args[] = {
++	{ HRPC_ARG_BLOB_SEQ, sizeof(char) },
++};
++const struct hrpc_method_def_interp4 apps_std_fremove_def = {
++	.msg_id = 24,
++	.n_args = HRPC_ARRAY_SIZE(apps_std_fremove_args),
++	.args = apps_std_fremove_args,
+diff -rN -U0 a/hexagonrpcd/interface/apps_std.h b/hexagonrpcd/interface/apps_std.h
+--- a/hexagonrpcd/interface/apps_std.h	2026-10-19 05:20:49.889038146 +0000
++++ b/hexagonrpcd/interface/apps_std.h	2026-10-19 05:38:25.686010386 +0000
+@@ -30,0 +31 @@
++extern struct hrpc_method_def_interp4 apps_std_fwrite_def;
+@@ -32,0 +34 @@
++extern struct hrpc_method_def_interp4 apps_std_fremove_def;
+diff -rN -U0 a/hexagonrpcd/rpcd_builder.c b/hexagonrpcd/rpcd_builder.c
+--- a/hexagonrpcd/rpcd_builder.c	2026-10-19 05:20:50.504056722 +0000
++++ b/hexagonrpcd/rpcd_builder.c	2026-10-19 05:21:36.256907827 +0000
+@@ -32 +32 @@
+-#define SENSORS_REGISTRY	"/sensors/registry/"
++#define SENSORS_REGISTRY	"/sensors/"
+@@ -162,0 +163,3 @@
++	struct hexagonfs_dirent *registry = hfs_map("registry", sns_reg);
++	if (registry)
++		registry->ops = &hexagonfs_registry_ops;
+@@ -165,3 +168 @@
+-					hfs_mkdir("registry", 1,
+-						hfs_map("registry", sns_reg)
+-					)
++					registry
+diff -rN -U0 a/tests/test_registry.c b/tests/test_registry.c
+--- a/tests/test_registry.c	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/test_registry.c	2026-10-19 05:40:24.471603371 +0000
+@@ -0,0 +1,162 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later */
++#include <assert.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include "../hexagonrpcd/hexagonfs.h"
++#include "../hexagonrpcd/apps_std.h"
++#include "../hexagonrpcd/rpcd_builder.h"
++#include <libhexagonrpc/error.h>
++
++static uint32_t rpc_remove(struct fastrpc_interface *iface, const char *name)
++{
++	uint32_t len = strlen(name) + 1;
++	struct fastrpc_io_buffer in[] = {{sizeof(len), &len}, {len, (void *)name}};
++	return iface->procs[24].impl(iface->data, in, NULL);
++}
++
++int main(int argc, char **argv)
++{
++	char root[] = "/dev/shm/coral-hexagonfs-XXXXXX";
++	char path[256], buf[8] = {0};
++	struct hexagonfs_fd *fds[HEXAGONFS_MAX_FD] = {0};
++	int fd, rootfd;
++	assert(mkdtemp(root));
++	snprintf(path, sizeof(path), "%s/sensors", root);
++	assert(mkdir(path, 0700) == 0);
++	snprintf(path, sizeof(path), "%s/sensors/registry", root);
++	assert(mkdir(path, 0700) == 0);
++	snprintf(path, sizeof(path), "%s/sensors/config", root);
++	assert(mkdir(path, 0700) == 0);
++	snprintf(path, sizeof(path), "%s/sensors/config/readonly", root);
++	fd = open(path, O_WRONLY | O_CREAT, 0600);
++	assert(fd >= 0);
++	assert(write(fd, "stock", 5) == 5);
++	close(fd);
++	rootfd = hexagonfs_open_root(fds, construct_root_dir(root, "sdsp"));
++	assert(rootfd >= 0);
++	const char *temp = "/mnt/vendor/persist/sensors/registry/temp.json";
++	fd = hexagonfs_openat_flags(fds, rootfd, rootfd, temp, O_WRONLY | O_CREAT | O_TRUNC);
++	assert(fd >= 0);
++	assert(hexagonfs_write(fds, fd, 4, "test") == 4);
++	assert(hexagonfs_close(fds, fd) == 0);
++	fd = hexagonfs_openat_flags(fds, rootfd, rootfd, temp, O_WRONLY | O_TRUNC);
++	assert(fd >= 0);
++	assert(hexagonfs_write(fds, fd, 1, "a") == 1);
++	assert(hexagonfs_close(fds, fd) == 0);
++	fd = hexagonfs_openat_flags(fds, rootfd, rootfd, temp, O_WRONLY | O_APPEND);
++	assert(fd >= 0);
++	assert(hexagonfs_write(fds, fd, 1, "b") == 1);
++	assert(hexagonfs_close(fds, fd) == 0);
++	fd = hexagonfs_openat(fds, rootfd, rootfd, "/persist/sensors/registry/temp.json");
++	assert(fd >= 0);
++	assert(hexagonfs_read(fds, fd, sizeof(buf), buf) == 2);
++	assert(strcmp(buf, "ab") == 0);
++	assert(hexagonfs_close(fds, fd) == 0);
++	fd = hexagonfs_openat_flags(fds, rootfd, rootfd,
++		"/persist/sensors/registry/sns_reg_version", O_WRONLY | O_CREAT);
++	assert(fd >= 0);
++	assert(hexagonfs_write(fds, fd, 1, "1") == 1);
++	assert(hexagonfs_close(fds, fd) == 0);
++	assert(hexagonfs_openat_flags(fds, rootfd, rootfd,
++		"/vendor/etc/sensors/config/readonly", O_WRONLY | O_TRUNC) == -EROFS);
++	fd = hexagonfs_openat(fds, rootfd, rootfd, "/vendor/etc/sensors/config/readonly");
++	assert(fd >= 0);
++	assert(hexagonfs_write(fds, fd, 1, "!") == -EROFS);
++	assert(hexagonfs_close(fds, fd) == 0);
++	snprintf(path, sizeof(path), "%s/sensors/escape", root);
++	assert(symlink("/tmp", path) == 0);
++	assert(hexagonfs_openat_flags(fds, rootfd, rootfd,
++		"/persist/sensors/registry/escape/no-write", O_WRONLY | O_CREAT) < 0);
++	assert(unlink(path) == 0);
++	/* Exercise actual apps_std fopen/fwrite/fclose implementations and metadata. */
++	struct fastrpc_interface *iface = fastrpc_apps_std_init(construct_root_dir(root, "sdsp"));
++	assert(iface && iface->procs[5].def->msg_id == 5);
++	uint32_t handle, prim[2] = {0}, result[2] = {0};
++	const char env[] = "ADSP_LIBRARY_PATH", mode[] = "w", empty[] = "";
++	struct fastrpc_io_buffer in[] = {
++		{sizeof(prim), prim}, {sizeof(env), (void *)env},
++		{sizeof(empty), (void *)empty}, {strlen(temp) + 1, (void *)temp},
++		{sizeof(mode), (void *)mode},
++	};
++	struct fastrpc_io_buffer out = {sizeof(handle), &handle};
++	assert(iface->procs[19].impl(iface->data, in, &out) == 0);
++	prim[0] = handle; prim[1] = 3;
++	struct fastrpc_io_buffer write_in[] = {{sizeof(prim), prim}, {3, "rpc"}};
++	out.s = sizeof(result); out.p = result;
++	assert(iface->procs[5].impl(iface->data, write_in, &out) == 0);
++	assert(result[0] == 3 && result[1] == 0);
++	assert(iface->procs[3].impl(iface->data, write_in, NULL) == 0);
++	fd = hexagonfs_openat(fds, rootfd, rootfd, temp);
++	assert(fd >= 0);
++	memset(buf, 0, sizeof(buf));
++	assert(hexagonfs_read(fds, fd, sizeof(buf), buf) == 3);
++	assert(strcmp(buf, "rpc") == 0);
++	assert(hexagonfs_close(fds, fd) == 0);
++	assert(iface->procs[24].def->msg_id == 24);
++	assert(iface->procs[24].def->n_args == 1);
++	assert(iface->procs[24].def->args[0].t == HRPC_ARG_BLOB_SEQ);
++	assert(rpc_remove(iface, temp) == 0);
++	assert(hexagonfs_openat(fds, rootfd, rootfd, temp) == -ENOENT);
++	assert(rpc_remove(iface, temp) == AEE_EFAILED);
++	assert(rpc_remove(iface, "/persist/sensors/registry/registry/../sns_reg_version") == 0);
++	assert(rpc_remove(iface, "/vendor/etc/sensors/config/readonly") == AEE_EFAILED);
++	assert(rpc_remove(iface,
++		"/persist/sensors/registry/../../../../vendor/etc/sensors/config/readonly") == AEE_EFAILED);
++	assert(rpc_remove(iface, "/persist/sensors/registry/..") == AEE_EFAILED);
++	assert(rpc_remove(iface, "/persist/sensors/registry") == AEE_EFAILED);
++	assert(rpc_remove(iface, "/persist/sensors/registry/registry") == AEE_EFAILED);
++	snprintf(path, sizeof(path), "%s/sensors/link", root);
++	assert(symlink("config/readonly", path) == 0);
++	assert(rpc_remove(iface, "/persist/sensors/registry/link") == AEE_EFAILED);
++	assert(unlink(path) == 0);
++	snprintf(path, sizeof(path), "%s/sensors/escape", root);
++	assert(symlink("config", path) == 0);
++	assert(rpc_remove(iface, "/persist/sensors/registry/escape/readonly") == AEE_EFAILED);
++	assert(unlink(path) == 0);
++	struct fastrpc_io_buffer bad[] = {{0, NULL}, {1, "x"}};
++	assert(iface->procs[24].impl(iface->data, bad, NULL) == AEE_EBADPARM);
++	bad[1].s = 0;
++	assert(iface->procs[24].impl(iface->data, bad, NULL) == AEE_EBADPARM);
++	fd = hexagonfs_openat(fds, rootfd, rootfd, "/vendor/etc/sensors/config/readonly");
++	assert(fd >= 0);
++	assert(hexagonfs_read(fds, fd, sizeof(buf), buf) == 5);
++	assert(memcmp(buf, "stock", 5) == 0);
++	assert(hexagonfs_close(fds, fd) == 0);
++	fastrpc_apps_std_deinit(iface);
++	assert(hexagonfs_close(fds, rootfd) == 0);
++	snprintf(path, sizeof(path), "%s/sensors/config/readonly", root);
++	assert(unlink(path) == 0);
++	snprintf(path, sizeof(path), "%s/sensors/config", root);
++	assert(rmdir(path) == 0);
++	snprintf(path, sizeof(path), "%s/sensors/registry", root);
++	assert(rmdir(path) == 0);
++	snprintf(path, sizeof(path), "%s/sensors", root);
++	assert(rmdir(path) == 0);
++	assert(rmdir(root) == 0);
++	if (argc == 2) {
++		snprintf(path, sizeof(path), "%s/sensors/temp.json", argv[1]);
++		fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
++		assert(fd >= 0);
++		assert(write(fd, "disk", 4) == 4);
++		assert(close(fd) == 0);
++		rootfd = hexagonfs_open_root(fds, construct_root_dir(argv[1], "sdsp"));
++		assert(rootfd >= 0);
++		assert(hexagonfs_openat_flags(fds, rootfd, rootfd, temp,
++			O_WRONLY | O_CREAT) == -EROFS);
++		assert(hexagonfs_close(fds, rootfd) == 0);
++		iface = fastrpc_apps_std_init(construct_root_dir(argv[1], "sdsp"));
++		assert(iface);
++		assert(rpc_remove(iface, temp) == AEE_EFAILED);
++		fastrpc_apps_std_deinit(iface);
++		fd = open(path, O_RDONLY);
++		assert(fd >= 0 && read(fd, buf, sizeof(buf)) == 4);
++		assert(memcmp(buf, "disk", 4) == 0);
++		assert(close(fd) == 0 && unlink(path) == 0);
++	}
++	puts("registry write/remove RPC and RO/traversal/symlink/non-RAM guards passed");
++	return 0;
++}

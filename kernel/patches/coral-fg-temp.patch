@@ -1,0 +1,238 @@
+diff --git a/drivers/power/supply/qcom_fg.c b/drivers/power/supply/qcom_fg.c
+index 1282d9519..89ea16587 100644
+--- a/drivers/power/supply/qcom_fg.c
++++ b/drivers/power/supply/qcom_fg.c
+@@ -6,6 +6,7 @@
+ #include <linux/kernel.h>
+ #include <linux/math64.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of_address.h>
+ #include <linux/of_device.h>
+ #include <linux/of_irq.h>
+@@ -27,9 +28,6 @@
+ #define PARAM_ADDR_BATT_VOLTAGE 0x1a0
+ #define PARAM_ADDR_BATT_CURRENT 0x1a2
+ 
+-/* RRADC */
+-#define ADC_RR_BATT_TEMP_LSB 0x288
+-
+ /* MEMIF */
+ #define MEM_INTF_STS(chip) (chip->ops->memif_base + 0x10)
+ #define MEM_INTF_CFG(chip) (chip->ops->memif_base + 0x50)
+@@ -82,6 +80,7 @@ struct qcom_fg_ops {
+ };
+ 
+ struct qcom_fg_chip {
++	struct mutex gen4_dma_lock;
+ 	struct device *dev;
+ 	unsigned int base;
+ 	struct regmap *regmap;
+@@ -184,6 +183,8 @@ static int qcom_fg_masked_write(struct qcom_fg_chip *chip, u16 addr, u8 mask,
+ 	return qcom_fg_write(chip, &reg, addr, 1);
+ }
+ 
++#include "qcom_fg_gen4_temp.h"
++
+ /************************
+  * SRAM FUNCTIONS
+  * **********************/
+@@ -814,30 +815,6 @@ static int qcom_fg_gen3_get_temp_threshold(struct qcom_fg_chip *chip,
+  * BATTERY STATUS, GEN4
+  * ***********************/
+ 
+-/**
+- * @brief qcom_fg_gen4_get_temperature() - Get temperature of battery
+- *
+- * @param chip Pointer to chip
+- * @param val Pointer to store value at
+- * @return int 0 on success, negative errno on error
+- */
+-static int qcom_fg_gen4_get_temperature(struct qcom_fg_chip *chip, int *val)
+-{
+-	int temp;
+-	u8 readval[2];
+-	int ret;
+-
+-	ret = qcom_fg_read(chip, readval, ADC_RR_BATT_TEMP_LSB, 2);
+-	if (ret) {
+-		dev_err(chip->dev, "Failed to read temperature: %d", ret);
+-		return ret;
+-	}
+-
+-	temp = readval[1] << 8 | readval[0];
+-	*val = temp * 10;
+-	return 0;
+-}
+-
+ /************************
+  * BATTERY POWER SUPPLY
+  * **********************/
+@@ -1170,6 +1147,7 @@ static int qcom_fg_probe(struct platform_device *pdev)
+ 		return -ENOMEM;
+ 
+ 	chip->dev = &pdev->dev;
++	mutex_init(&chip->gen4_dma_lock);
+ 	chip->ops = of_device_get_match_data(&pdev->dev);
+ 
+ 	chip->regmap = dev_get_regmap(pdev->dev.parent, NULL);
+@@ -1221,6 +1199,12 @@ static int qcom_fg_probe(struct platform_device *pdev)
+ 		return ret;
+ 	}
+ 
++	if (of_device_is_compatible(pdev->dev.of_node, "qcom,pm8150b-fg")) {
++		ret = qcom_fg_gen4_init_dma(chip);
++		if (ret)
++			return dev_err_probe(chip->dev, ret, "Gen4 DMA setup failed\n");
++	}
++
+ 	supply_config.drv_data = chip;
+ 
+ 	chip->batt_psy = devm_power_supply_register(chip->dev, &batt_psy_desc,
+diff --git a/drivers/power/supply/qcom_fg_gen4_temp.h b/drivers/power/supply/qcom_fg_gen4_temp.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/power/supply/qcom_fg_gen4_temp.h
+@@ -0,0 +1,142 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* PM8150B temperature access from Google msm 82a738b32e3f715728b846f8908083286287cb06:
++ * fg-memif.c/fg-reg.h DMA protocol and qpnp-fg-gen4.c word328 decoding.
++ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
++ * The old four-byte SRAM helper requires an IRQ absent on this generation.
++ */
++#include <linux/delay.h>
++
++#define GEN4_MEM_ARB_CFG(chip) ((chip)->ops->memif_base + 0x40)
++#define GEN4_PEEK_MUX4 0x1ee
++#define GEN4_PEEK_RD 0x1ef
++/* DMA4 covers SRAM words300..405, two bytes per word, window starts +0x20. */
++#define GEN4_TEMP_DMA_ADDR (0x800 + 0x20 + (328 - 300) * 2)
++
++static int qcom_fg_gen4_init_dma(struct qcom_fg_chip *chip)
++{
++	u8 mux = 0xac;
++	int ret;
++
++	/* Partition addressing and low latency, as stock fg_dma_init(). */
++	ret = qcom_fg_masked_write(chip, MEM_IF_DMA_CTL(chip), BIT(1), BIT(1));
++	if (ret)
++		return ret;
++	ret = qcom_fg_masked_write(chip, GEN4_MEM_ARB_CFG(chip),
++				   BIT(2) | BIT(1), BIT(1));
++	if (ret)
++		return ret;
++	return qcom_fg_write(chip, &mux, GEN4_PEEK_MUX4, 1);
++}
++
++static int qcom_fg_gen4_release_dma(struct qcom_fg_chip *chip)
++{
++	int ret, release;
++
++	ret = qcom_fg_masked_write(chip, MEM_INTF_CFG(chip), BIT(7) | BIT(5), 0);
++	release = qcom_fg_masked_write(chip, GEN4_MEM_ARB_CFG(chip), BIT(0), 0);
++	if (ret || release)
++		dev_err_ratelimited(chip->dev, "Gen4 DMA release failed: %d/%d\n", ret, release);
++	return ret ?: release;
++}
++
++static int qcom_fg_gen4_clear_dma_errors(struct qcom_fg_chip *chip)
++{
++	u8 status;
++	int ret;
++
++	/* Stock fg_clear_dma_errors_if_any(): DMA_CTL[0] clears sticky logs.
++	 * Deassert before the new transaction so its errors remain observable.
++	 */
++	ret = qcom_fg_read(chip, &status, MEM_IF_DMA_STS(chip), 1);
++	if (ret)
++		return ret;
++	if (status & (BIT(1) | BIT(2))) {
++		dev_warn_ratelimited(chip->dev, "Clearing previous Gen4 DMA errors: %#x\n", status);
++		ret = qcom_fg_masked_write(chip, MEM_IF_DMA_CTL(chip), BIT(0), BIT(0));
++		if (ret)
++			return ret;
++	}
++	ret = qcom_fg_masked_write(chip, MEM_IF_DMA_CTL(chip), BIT(0), 0);
++	if (ret)
++		return ret;
++	ret = qcom_fg_read(chip, &status, MEM_IF_DMA_STS(chip), 1);
++	if (!ret && (status & (BIT(1) | BIT(2))))
++		ret = -EIO;
++	return ret;
++}
++
++static int qcom_fg_gen4_get_temperature(struct qcom_fg_chip *chip, int *val)
++{
++	u8 data[2], status;
++	int ret, release, i;
++
++	guard(mutex)(&chip->gen4_dma_lock);
++	/* Never take over another memory transaction. */
++	ret = qcom_fg_read(chip, &status, MEM_INTF_CFG(chip), 1);
++	if (ret)
++		return ret;
++	if (status & (BIT(7) | BIT(5)))
++		return -EBUSY;
++	ret = qcom_fg_read(chip, &status, GEN4_MEM_ARB_CFG(chip), 1);
++	if (ret)
++		return ret;
++	if (status & BIT(0))
++		return -EBUSY;
++	ret = qcom_fg_gen4_clear_dma_errors(chip);
++	if (ret) {
++		dev_err_ratelimited(chip->dev, "Gen4 DMA error recovery failed: %d\n", ret);
++		return ret;
++	}
++
++	/* Stock PM8150B-v1 DMA workaround, conservatively used on both revisions.
++	 * ALG_ACTIVE may need320ms during ESR pulses; stock polls35x10ms.
++	 */
++	for (i = 0; i < 35; i++) {
++		ret = qcom_fg_read(chip, &status, GEN4_PEEK_RD, 1);
++		if (ret)
++			return ret;
++		if (!(status & BIT(3)))
++			break;
++		usleep_range(10000, 10001);
++	}
++	if (i == 35)
++		return -ETIMEDOUT;
++	usleep_range(1000, 1001);
++	ret = qcom_fg_masked_write(chip, GEN4_MEM_ARB_CFG(chip), BIT(0), BIT(0));
++	if (ret)
++		goto out;
++	ret = qcom_fg_masked_write(chip, MEM_INTF_CFG(chip), BIT(7) | BIT(5), BIT(7));
++	if (ret)
++		goto out;
++	usleep_range(40, 41);
++	for (i = 0; i < 50; i++) {
++		ret = qcom_fg_read(chip, &status, MEM_INTF_STS(chip), 1);
++		if (ret)
++			goto out;
++		if (status & BIT(3))
++			break;
++		usleep_range(10000, 10001);
++	}
++	if (i == 50) {
++		ret = -ETIMEDOUT;
++		goto out;
++	}
++	usleep_range(1000, 1001);
++	ret = qcom_fg_read(chip, data, GEN4_TEMP_DMA_ADDR, sizeof(data));
++	if (ret)
++		goto out;
++	ret = qcom_fg_read(chip, &status, MEM_IF_DMA_STS(chip), 1);
++	if (!ret && (status & (BIT(1) | BIT(2))))
++		ret = -EIO;
++out:
++	release = qcom_fg_gen4_release_dma(chip);
++	if (!ret)
++		ret = release;
++	if (ret) {
++		dev_err_ratelimited(chip->dev, "Gen4 SRAM temperature read failed: %d\n", ret);
++		return ret;
++	}
++	/* Signed10-bit two's-complement, 0.25C/LSB -> deci degrees C. */
++	*val = sign_extend32(data[0] | (data[1] << 8), 9) * 100 / 40;
++	return 0;
++}

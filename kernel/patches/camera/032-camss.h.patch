@@ -1,0 +1,33 @@
+--- a/drivers/media/platform/qcom/camss/camss.h
++++ b/drivers/media/platform/qcom/camss/camss.h
+@@ -82,6 +82,7 @@
+ 	CAMSS_8x16,
+ 	CAMSS_8x53,
+ 	CAMSS_8x96,
++	CAMSS_8150,
+ 	CAMSS_8250,
+ 	CAMSS_8280XP,
+ 	CAMSS_845,
+@@ -92,6 +93,7 @@
+ enum icc_count {
+ 	ICC_DEFAULT_COUNT = 0,
+ 	ICC_SM8250_COUNT = 4,
++	ICC_SM8150_COUNT = 7,
+ };
+ 
+ struct camss_resources {
+@@ -124,12 +126,13 @@
+ 	int genpd_num;
+ 	struct device *genpd;
+ 	struct device_link *genpd_link;
+-	struct icc_path *icc_path[ICC_SM8250_COUNT];
++	struct icc_path *icc_path[ICC_SM8150_COUNT];
+ 	const struct camss_resources *res;
+ };
+ 
+ struct camss_camera_interface {
+ 	u8 csiphy_id;
++	u8 csiphy_endpoint;
+ 	struct csiphy_csi2_cfg csi2;
+ };
+ 

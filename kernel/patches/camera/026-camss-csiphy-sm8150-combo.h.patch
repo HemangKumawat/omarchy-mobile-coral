@@ -1,0 +1,80 @@
+--- /dev/null
++++ b/drivers/media/platform/qcom/camss/camss-csiphy-sm8150-combo.h
+@@ -0,0 +1,77 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
++ * SM8150 CSIPHY v1.1 D-PHY combo profiles, from Google's coral GPL kernel:
++ * android.googlesource.com/kernel/msm, android-msm-coral-4.14-android13,
++ * drivers/media/platform/msm/camera/cam_sensor_module/cam_csiphy/include/
++ * cam_csiphy_1_1_hwreg.h, csiphy_2ph_v1_1_combo_mode_reg.
++ * Only the two independent one-data-lane groups used on coral are included.
++ */
++#ifndef CAMSS_CSIPHY_SM8150_COMBO_H
++#define CAMSS_CSIPHY_SM8150_COMBO_H
++
++/* Data0 + clock0; data2 + clock1 (the latter reuses the data3 receiver). */
++static const struct csiphy_lane_regs lane_regs_sm8150_combo[2][28] = {
++	{
++		{0x0004, 0x0C, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x002C, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0034, 0x07, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x001C, 0x08, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0014, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0028, 0x00, 0x00, CSIPHY_DNP_PARAMS},
++		{0x003C, 0xB8, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0000, 0x8D, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0008, 0x0E, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
++		{0x000C, 0x00, 0x00, CSIPHY_DNP_PARAMS},
++		{0x0010, 0x52, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0038, 0xFE, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0060, 0x31, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0064, 0x7F, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0704, 0x0C, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x072C, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0734, 0x07, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x071C, 0x08, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0714, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0728, 0x04, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x073C, 0xB8, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0700, 0x80, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0708, 0x0E, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
++		{0x070C, 0xA5, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0710, 0x52, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0738, 0x1F, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0760, 0x31, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0764, 0x7F, 0x00, CSIPHY_DEFAULT_PARAMS},
++	},
++	{
++		{0x0404, 0x0C, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x042C, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0434, 0x07, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x041C, 0x08, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0414, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0428, 0x0A, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x043C, 0xB8, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0400, 0x8D, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0408, 0x0E, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
++		{0x040C, 0x00, 0x00, CSIPHY_DNP_PARAMS},
++		{0x0410, 0x52, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0438, 0xFE, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0460, 0x31, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0464, 0x7F, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0604, 0x0C, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x062C, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0634, 0x07, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x061C, 0x08, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0614, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0628, 0x0E, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x063C, 0xB8, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0600, 0x80, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0608, 0x0E, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
++		{0x060C, 0xA5, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0610, 0x52, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0638, 0x1F, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0660, 0x31, 0x00, CSIPHY_DEFAULT_PARAMS},
++		{0x0664, 0x7F, 0x00, CSIPHY_DEFAULT_PARAMS},
++	},
++};
++
++#endif /* CAMSS_CSIPHY_SM8150_COMBO_H */

@@ -1,0 +1,83 @@
+--- a/Documentation/devicetree/bindings/media/qcom,sm8150-camss.yaml
++++ b/Documentation/devicetree/bindings/media/qcom,sm8150-camss.yaml
+@@ -398,3 +398,80 @@
+               "csiphy0",
+               "csiphy0_timer",
+               "csiphy0_timer_src",
++              "csiphy1",
++              "csiphy1_timer",
++              "csiphy1_timer_src",
++              "csiphy2",
++              "csiphy2_timer",
++              "csiphy2_timer_src",
++              "csiphy3",
++              "csiphy3_timer",
++              "csiphy3_timer_src",
++              "vfe0_axi",
++              "vfe0",
++              "vfe0_src",
++              "vfe0_cphy_rx",
++              "vfe0_csid",
++              "vfe0_csid_src",
++              "vfe1_axi",
++              "vfe1",
++              "vfe1_src",
++              "vfe1_cphy_rx",
++              "vfe1_csid",
++              "vfe1_csid_src",
++              "vfe_lite0",
++              "vfe_lite0_src",
++              "vfe_lite0_cphy_rx",
++              "vfe_lite0_csid",
++              "vfe_lite0_csid_src",
++              "vfe_lite1",
++              "vfe_lite1_src",
++              "vfe_lite1_cphy_rx",
++              "vfe_lite1_csid",
++              "vfe_lite1_csid_src",
++              "slow_ahb_src",
++              "gcc_ahb",
++              "gcc_axi_hf",
++              "gcc_axi_sf";
++
++            iommus = <&apps_smmu 0x840 0x620>,
++              <&apps_smmu 0x860 0x620>,
++              <&apps_smmu 0xA40 0x620>,
++              <&apps_smmu 0xA60 0x620>,
++              <&apps_smmu 0xC40 0x620>,
++              <&apps_smmu 0xC60 0x620>,
++              <&apps_smmu 0xE40 0x620>,
++              <&apps_smmu 0xE60 0x620>;
++
++            interconnects = <&gem_noc MASTER_AMPSS_M0 0 &config_noc SLAVE_CAMERA_CFG 0>,
++                <&mmss_noc MASTER_CAMNOC_HF0 0 &mc_virt SLAVE_EBI_CH0 0>,
++                <&mmss_noc MASTER_CAMNOC_HF1 0 &mc_virt SLAVE_EBI_CH0 0>,
++                <&mmss_noc MASTER_CAMNOC_SF 0 &mc_virt SLAVE_EBI_CH0 0>;
++
++            interconnect-names = "cam_ahb",
++              "cam_hf_0_mnoc",
++              "cam_hf_1_mnoc",
++              "cam_sf_0_mnoc";
++
++            vdda-phy-supply = <&vreg_l5a_0p88>;
++            vdda-pll-supply = <&vreg_l3c_1p2>;
++
++            ports {
++                #address-cells = <1>;
++                #size-cells = <0>;
++
++                port@0 {
++                    reg = <0>;
++                    #address-cells = <1>;
++                    #size-cells = <0>;
++
++                    csiphy_ep0: endpoint@0 {
++                        reg = <0>;
++                        clock-lanes = <7>;
++                        data-lanes = <0 1 2 3>;
++                        remote-endpoint = <&sensor_ep>;
++                    };
++                };
++            };
++        };
++    };

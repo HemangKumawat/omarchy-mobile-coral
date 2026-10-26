@@ -1,0 +1,100 @@
+--- a/drivers/power/reset/qcom-pon.c
++++ b/drivers/power/reset/qcom-pon.c
+@@ -25,6 +25,9 @@
+ 	u32 baseaddr;
+ 	struct reboot_mode_driver reboot_mode;
+ 	long reason_shift;
++	bool coral_guard;
++	bool coral_healthy;
++	struct notifier_block coral_reboot;
+ };
+ 
+ static int qcom_pon_reboot_mode_write(struct reboot_mode_driver *reboot,
+@@ -43,6 +46,63 @@
+ 
+ 	return ret;
+ }
++
++/* Keep Fastboot latched across panic/emergency_restart and hardware watchdog
++ * resets. Only an orderly, healthy userspace reboot may clear it. This PMIC
++ * spare register is the same reason consumed by the existing bootloader helper.
++ */
++static int coral_reboot_notify(struct notifier_block *nb,
++                              unsigned long event, void *cmd)
++{
++	struct qcom_pon *pon = container_of(nb, struct qcom_pon, coral_reboot);
++	bool normal = !cmd || !strcmp(cmd, "normal");
++	unsigned int reason = 2;
++
++	if (READ_ONCE(pon->coral_healthy) && normal &&
++	    (event == SYS_RESTART || event == SYS_POWER_OFF))
++		reason = 0;
++	return qcom_pon_reboot_mode_write(&pon->reboot_mode, reason) < 0 ?
++		NOTIFY_BAD : NOTIFY_DONE;
++}
++
++static ssize_t coral_healthy_show(struct device *dev,
++                                 struct device_attribute *attr, char *buf)
++{
++	struct qcom_pon *pon = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "%u\n", READ_ONCE(pon->coral_healthy));
++}
++
++static ssize_t coral_healthy_store(struct device *dev,
++                                  struct device_attribute *attr,
++                                  const char *buf, size_t count)
++{
++	struct qcom_pon *pon = dev_get_drvdata(dev);
++	bool healthy;
++	int ret = kstrtobool(buf, &healthy);
++
++	if (ret)
++		return ret;
++	WRITE_ONCE(pon->coral_healthy, healthy);
++	return count;
++}
++static DEVICE_ATTR_RW(coral_healthy);
++static ssize_t coral_recovery_reason_show(struct device *dev,
++                                         struct device_attribute *attr, char *buf)
++{
++	struct qcom_pon *pon = dev_get_drvdata(dev);
++	unsigned int value;
++	int ret = regmap_read(pon->regmap, pon->baseaddr + PON_SOFT_RB_SPARE, &value);
++
++	if (ret)
++		return ret;
++	return sysfs_emit(buf, "%u\n", (value & GENMASK(7, pon->reason_shift)) >> pon->reason_shift);
++}
++static DEVICE_ATTR_RO(coral_recovery_reason);
++static struct attribute *coral_attrs[] = {
++	&dev_attr_coral_healthy.attr, &dev_attr_coral_recovery_reason.attr, NULL
++};
++static const struct attribute_group coral_group = { .attrs = coral_attrs };
+ 
+ static int qcom_pon_probe(struct platform_device *pdev)
+ {
+@@ -81,6 +141,23 @@
+ 	}
+ 
+ 	platform_set_drvdata(pdev, pon);
++	pon->coral_guard = of_machine_is_compatible("google,coral");
++	if (pon->coral_guard) {
++		if (reason_shift != GEN2_REASON_SHIFT)
++			return dev_err_probe(&pdev->dev, -EINVAL, "unexpected coral PON layout\n");
++		error = qcom_pon_reboot_mode_write(&pon->reboot_mode, 2);
++		if (error)
++			return dev_err_probe(&pdev->dev, error, "cannot arm Fastboot recovery\n");
++		pon->coral_reboot.notifier_call = coral_reboot_notify;
++		pon->coral_reboot.priority = 128;
++		error = devm_register_reboot_notifier(&pdev->dev, &pon->coral_reboot);
++		if (error)
++			return error;
++		error = devm_device_add_group(&pdev->dev, &coral_group);
++		if (error)
++			return error;
++		dev_info(&pdev->dev, "coral Fastboot recovery armed before userspace\n");
++	}
+ 
+ 	return devm_of_platform_populate(&pdev->dev);
+ }

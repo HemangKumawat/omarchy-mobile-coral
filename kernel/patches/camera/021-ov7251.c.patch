@@ -1,0 +1,437 @@
+--- a/drivers/media/i2c/ov7251.c
++++ b/drivers/media/i2c/ov7251.c
+@@ -14,6 +14,7 @@
+ #include <linux/i2c.h>
+ #include <linux/init.h>
+ #include <linux/module.h>
++#include <linux/of.h>
+ #include <linux/mod_devicetable.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/regulator/consumer.h>
+@@ -159,7 +160,14 @@
+ 	bool power_on;
+ 
+ 	struct gpio_desc *enable_gpio;
+-};
++	struct gpio_desc *peer_enable_gpio;
++	struct regulator *aux_regulator;
++	u32 probe_address;
++	u8 fsin_role; /* 0: free-running, 1: master, 2: slave */
++};
++
++/* Serialize reset and SCCB address assignment for modules sharing a bus. */
++static DEFINE_MUTEX(ov7251_address_lock);
+ 
+ static inline struct ov7251 *to_ov7251(struct v4l2_subdev *sd)
+ {
+@@ -689,10 +697,14 @@
+ 	 * to be enabled not earlier than io regulator
+ 	 */
+ 
++	ret = ov7251->aux_regulator ? regulator_enable(ov7251->aux_regulator) : 0;
++	if (ret)
++		return ret;
++
+ 	ret = regulator_enable(ov7251->io_regulator);
+ 	if (ret < 0) {
+ 		dev_err(ov7251->dev, "set io voltage failed\n");
+-		return ret;
++		goto err_disable_aux;
+ 	}
+ 
+ 	ret = regulator_enable(ov7251->analog_regulator);
+@@ -714,6 +726,9 @@
+ 
+ err_disable_io:
+ 	regulator_disable(ov7251->io_regulator);
++err_disable_aux:
++	if (ov7251->aux_regulator)
++		regulator_disable(ov7251->aux_regulator);
+ 
+ 	return ret;
+ }
+@@ -733,9 +748,14 @@
+ 	ret = regulator_disable(ov7251->io_regulator);
+ 	if (ret < 0)
+ 		dev_err(ov7251->dev, "io regulator disable failed\n");
+-}
+-
+-static int ov7251_write_reg(struct ov7251 *ov7251, u16 reg, u8 val)
++	if (ov7251->aux_regulator) {
++		ret = regulator_disable(ov7251->aux_regulator);
++		if (ret)
++			dev_err(ov7251->dev, "aux regulator disable failed: %d\n", ret);
++	}
++}
++
++static int ov7251_write_reg_unlocked(struct ov7251 *ov7251, u16 reg, u8 val)
+ {
+ 	u8 regbuf[3];
+ 	int ret;
+@@ -745,7 +765,9 @@
+ 	regbuf[2] = val;
+ 
+ 	ret = i2c_master_send(ov7251->i2c_client, regbuf, 3);
+-	if (ret < 0) {
++	if (ret != sizeof(regbuf)) {
++		if (ret >= 0)
++			ret = -EIO;
+ 		dev_err(ov7251->dev, "%s: write reg error %d: reg=%x, val=%x\n",
+ 			__func__, ret, reg, val);
+ 		return ret;
+@@ -754,7 +776,17 @@
+ 	return 0;
+ }
+ 
+-static int ov7251_write_seq_regs(struct ov7251 *ov7251, u16 reg, u8 *val,
++static int ov7251_write_reg(struct ov7251 *ov7251, u16 reg, u8 val)
++{
++	int ret;
++
++	mutex_lock(&ov7251_address_lock);
++	ret = ov7251_write_reg_unlocked(ov7251, reg, val);
++	mutex_unlock(&ov7251_address_lock);
++	return ret;
++}
++
++static int ov7251_write_seq_regs_unlocked(struct ov7251 *ov7251, u16 reg, u8 *val,
+ 				 u8 num)
+ {
+ 	u8 regbuf[5];
+@@ -770,7 +802,9 @@
+ 	memcpy(regbuf + 2, val, num);
+ 
+ 	ret = i2c_master_send(ov7251->i2c_client, regbuf, nregbuf);
+-	if (ret < 0) {
++	if (ret != nregbuf) {
++		if (ret >= 0)
++			ret = -EIO;
+ 		dev_err(ov7251->dev,
+ 			"%s: write seq regs error %d: first reg=%x\n",
+ 			__func__, ret, reg);
+@@ -780,7 +814,17 @@
+ 	return 0;
+ }
+ 
+-static int ov7251_read_reg(struct ov7251 *ov7251, u16 reg, u8 *val)
++static int ov7251_write_seq_regs(struct ov7251 *ov7251, u16 reg, u8 *val, u8 num)
++{
++	int ret;
++
++	mutex_lock(&ov7251_address_lock);
++	ret = ov7251_write_seq_regs_unlocked(ov7251, reg, val, num);
++	mutex_unlock(&ov7251_address_lock);
++	return ret;
++}
++
++static int ov7251_read_reg_unlocked(struct ov7251 *ov7251, u16 reg, u8 *val)
+ {
+ 	u8 regbuf[2];
+ 	int ret;
+@@ -789,20 +833,34 @@
+ 	regbuf[1] = reg & 0xff;
+ 
+ 	ret = i2c_master_send(ov7251->i2c_client, regbuf, 2);
+-	if (ret < 0) {
++	if (ret != 2) {
++		if (ret >= 0)
++			ret = -EIO;
+ 		dev_err(ov7251->dev, "%s: write reg error %d: reg=%x\n",
+ 			__func__, ret, reg);
+ 		return ret;
+ 	}
+ 
+ 	ret = i2c_master_recv(ov7251->i2c_client, val, 1);
+-	if (ret < 0) {
++	if (ret != 1) {
++		if (ret >= 0)
++			ret = -EIO;
+ 		dev_err(ov7251->dev, "%s: read reg error %d: reg=%x\n",
+ 			__func__, ret, reg);
+ 		return ret;
+ 	}
+ 
+ 	return 0;
++}
++
++static int ov7251_read_reg(struct ov7251 *ov7251, u16 reg, u8 *val)
++{
++	int ret;
++
++	mutex_lock(&ov7251_address_lock);
++	ret = ov7251_read_reg_unlocked(ov7251, reg, val);
++	mutex_unlock(&ov7251_address_lock);
++	return ret;
+ }
+ 
+ static int ov7251_pll_configure(struct ov7251 *ov7251)
+@@ -903,6 +961,40 @@
+ 	return 0;
+ }
+ 
++/* Assign both SCCB aliases: no remapped peer may keep answering factory 0x60. */
++static int ov7251_assign_address(struct ov7251 *ov7251)
++{
++	struct i2c_client *client = ov7251->i2c_client;
++	u8 data[] = { 0x01, 0x03, 0x01 };
++	struct i2c_msg msg = {
++		.addr = ov7251->probe_address,
++		.len = sizeof(data),
++		.buf = data,
++	};
++	int ret;
++
++	/* Software reset must precede address reassignment. */
++	ret = i2c_transfer(client->adapter, &msg, 1);
++	if (ret != 1)
++		return ret < 0 ? ret : -EIO;
++	usleep_range(1000, 1500);
++	/* SC_REG3B[1] gates the programmable SCCB IDs after reset. */
++	data[0] = 0x30;
++	data[1] = 0x3b;
++	data[2] = 0x02;
++	ret = i2c_transfer(client->adapter, &msg, 1);
++	if (ret != 1)
++		return ret < 0 ? ret : -EIO;
++	data[0] = 0x01;
++	data[1] = 0x09;
++	data[2] = client->addr << 1;
++	ret = i2c_transfer(client->adapter, &msg, 1);
++	if (ret != 1)
++		return ret < 0 ? ret : -EIO;
++
++	return ov7251_write_reg_unlocked(ov7251, 0x302b, client->addr << 1);
++}
++
+ static int ov7251_set_power_on(struct device *dev)
+ {
+ 	struct i2c_client *client = container_of(dev, struct i2c_client, dev);
+@@ -924,6 +1016,7 @@
+ 
+ 	usleep_range(1000, 1100);
+ 
++	mutex_lock(&ov7251_address_lock);
+ 	gpiod_set_value_cansleep(ov7251->enable_gpio, 1);
+ 
+ 	/* wait at least 65536 external clock cycles */
+@@ -931,17 +1024,27 @@
+ 			       DIV_ROUND_UP(ov7251->xclk_freq, 1000));
+ 	usleep_range(wait_us, wait_us + 1000);
+ 
++	if (ov7251->probe_address) {
++		ret = ov7251_assign_address(ov7251);
++		if (ret) {
++			dev_err(dev, "SCCB address assignment failed: %d\n", ret);
++			goto err_reset;
++		}
++	}
++	mutex_unlock(&ov7251_address_lock);
+ 	ret = ov7251_set_register_array(ov7251,
+-					ov7251_global_init_setting,
+-					ARRAY_SIZE(ov7251_global_init_setting));
+-	if (ret < 0) {
+-		dev_err(ov7251->dev, "error during global init\n");
+-		gpiod_set_value_cansleep(ov7251->enable_gpio, 0);
+-		clk_disable_unprepare(ov7251->xclk);
+-		ov7251_regulators_disable(ov7251);
+-		return ret;
+-	}
+-
++			ov7251_global_init_setting + !!ov7251->probe_address,
++			ARRAY_SIZE(ov7251_global_init_setting) - !!ov7251->probe_address);
++	if (!ret)
++		return 0;
++
++	dev_err(ov7251->dev, "error during global init: %d\n", ret);
++	mutex_lock(&ov7251_address_lock);
++err_reset:
++	gpiod_set_value_cansleep(ov7251->enable_gpio, 0);
++	mutex_unlock(&ov7251_address_lock);
++	clk_disable_unprepare(ov7251->xclk);
++	ov7251_regulators_disable(ov7251);
+ 	return ret;
+ }
+ 
+@@ -951,8 +1054,10 @@
+ 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+ 	struct ov7251 *ov7251 = to_ov7251(sd);
+ 
++	mutex_lock(&ov7251_address_lock);
++	gpiod_set_value_cansleep(ov7251->enable_gpio, 0);
++	mutex_unlock(&ov7251_address_lock);
+ 	clk_disable_unprepare(ov7251->xclk);
+-	gpiod_set_value_cansleep(ov7251->enable_gpio, 0);
+ 	ov7251_regulators_disable(ov7251);
+ 
+ 	return 0;
+@@ -1334,6 +1439,45 @@
+ 	return 0;
+ }
+ 
++/* Configure frame sync without driving the module's optical strobe pins. */
++static int ov7251_configure_fsin(struct ov7251 *ov7251)
++{
++	struct reg_value regs[] = {
++		{ 0x3005, ov7251->fsin_role == 1 ? 0x02 : 0x00 },
++		{ 0x3027, 0x00 }, /* Natural VSYNC, no software pin override. */
++		{ 0x3666, ov7251->fsin_role ? 0x00 : 0x0a },
++		{ 0x3823, ov7251->fsin_role == 2 ? 0x30 :
++			  ov7251->fsin_role == 1 ? 0x10 : 0x00 },
++		{ 0x3824, 0x01 }, { 0x3825, 0x07 },
++		{ 0x3826, 0x00 }, { 0x3827, 0x00 },
++		{ 0x3b80, 0x00 }, { 0x3b81, 0x00 }, { 0x3b96, 0x00 },
++	};
++	static const char * const names[] = { "off", "master", "slave" };
++	unsigned int i;
++	u8 value;
++	int ret;
++
++	if (!device_property_present(ov7251->dev, "ovti,fsin-role"))
++		return 0;
++
++	ret = ov7251_set_register_array(ov7251, regs, ARRAY_SIZE(regs));
++	if (ret)
++		return ret;
++	for (i = 0; i < ARRAY_SIZE(regs); i++) {
++		ret = ov7251_read_reg(ov7251, regs[i].reg, &value);
++		if (ret)
++			return ret;
++		if (value != regs[i].val)
++			return dev_err_probe(ov7251->dev, -EIO,
++				"frame-sync readback mismatch at 0x%04x\n",
++				regs[i].reg);
++	}
++	dev_info(ov7251->dev,
++		 "coral-camera sync-role=%s io=0x%02x mux=0x%02x timing=0x%02x cs-reset=0x0107 r-reset=0x0000 strobe=off verified=1\n",
++		 names[ov7251->fsin_role], regs[0].val, regs[2].val, regs[3].val);
++	return 0;
++}
++
+ static int ov7251_s_stream(struct v4l2_subdev *subdev, int enable)
+ {
+ 	struct ov7251 *ov7251 = to_ov7251(subdev);
+@@ -1368,6 +1512,9 @@
+ 			dev_err(ov7251->dev, "could not sync v4l2 controls\n");
+ 			goto err_power_down;
+ 		}
++		ret = ov7251_configure_fsin(ov7251);
++		if (ret)
++			goto err_power_down;
+ 		ret = ov7251_write_reg(ov7251, OV7251_SC_MODE_SELECT,
+ 				       OV7251_SC_MODE_SELECT_STREAMING);
+ 		if (ret)
+@@ -1551,6 +1698,8 @@
+ 				     "could not read revision\n");
+ 	chip_rev >>= 4;
+ 
++	dev_info(ov7251->dev, "coral-camera chip-id=0x%04x\n",
++		 (chip_id_high << 8) | chip_id_low);
+ 	dev_info(ov7251->dev,
+ 		 "OV7251 revision %x (%s) detected at address 0x%02x\n",
+ 		 chip_rev,
+@@ -1626,11 +1775,56 @@
+ 	return 0;
+ }
+ 
++/* One module owns both resets from probe, before either sensor leaves reset. */
++static int ov7251_get_enable_gpio(struct ov7251 *ov7251)
++{
++	struct device *dev = ov7251->dev;
++	struct device_node *node;
++	struct i2c_client *provider;
++	struct v4l2_subdev *sd;
++	struct ov7251 *lead;
++	struct device_link *link;
++
++	node = of_parse_phandle(dev->of_node, "ovti,reset-provider", 0);
++	if (!node) {
++		ov7251->enable_gpio = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
++		if (IS_ERR(ov7251->enable_gpio))
++			return PTR_ERR(ov7251->enable_gpio);
++		ov7251->peer_enable_gpio = devm_gpiod_get_optional(dev, "peer-enable",
++							       GPIOD_OUT_LOW);
++		return PTR_ERR_OR_ZERO(ov7251->peer_enable_gpio);
++	}
++	if (!of_device_is_compatible(node, "ovti,ov7251")) {
++		of_node_put(node);
++		return -EINVAL;
++	}
++	provider = of_find_i2c_device_by_node(node);
++	of_node_put(node);
++	if (!provider)
++		return -EPROBE_DEFER;
++	if (!device_is_bound(&provider->dev)) {
++		put_device(&provider->dev);
++		return -EPROBE_DEFER;
++	}
++	sd = i2c_get_clientdata(provider);
++	lead = sd ? to_ov7251(sd) : NULL;
++	if (!lead || !lead->peer_enable_gpio ||
++	    provider->adapter != ov7251->i2c_client->adapter) {
++		put_device(&provider->dev);
++		return -EINVAL;
++	}
++	link = device_link_add(dev, &provider->dev, DL_FLAG_AUTOREMOVE_CONSUMER);
++	ov7251->enable_gpio = lead->peer_enable_gpio;
++	put_device(&provider->dev);
++	return link ? 0 : -ENOMEM;
++}
++
+ static int ov7251_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+ 	struct ov7251 *ov7251;
+ 	unsigned int rate = 0, clk_rate = 0;
++	const char *fsin_role;
+ 	int ret;
+ 	int i;
+ 
+@@ -1640,6 +1834,26 @@
+ 
+ 	ov7251->i2c_client = client;
+ 	ov7251->dev = dev;
++	if (device_property_present(dev, "ovti,probe-address")) {
++		ret = device_property_read_u32(dev, "ovti,probe-address",
++					       &ov7251->probe_address);
++		if (ret || ov7251->probe_address != 0x60 ||
++		    client->addr < 0x08 || client->addr > 0x77)
++			return dev_err_probe(dev, -EINVAL, "invalid probe address\n");
++	}
++
++
++	if (device_property_present(dev, "ovti,fsin-role")) {
++		ret = device_property_read_string(dev, "ovti,fsin-role", &fsin_role);
++		if (ret)
++			return dev_err_probe(dev, ret, "invalid FSIN role\n");
++		if (!strcmp(fsin_role, "master"))
++			ov7251->fsin_role = 1;
++		else if (!strcmp(fsin_role, "slave"))
++			ov7251->fsin_role = 2;
++		else if (strcmp(fsin_role, "off"))
++			return dev_err_probe(dev, -EINVAL, "invalid FSIN role\n");
++	}
+ 
+ 	ret = ov7251_check_hwcfg(ov7251);
+ 	if (ret)
+@@ -1703,11 +1917,16 @@
+ 		return PTR_ERR(ov7251->analog_regulator);
+ 	}
+ 
+-	ov7251->enable_gpio = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
+-	if (IS_ERR(ov7251->enable_gpio)) {
+-		dev_err(dev, "cannot get enable gpio\n");
+-		return PTR_ERR(ov7251->enable_gpio);
+-	}
++	ov7251->aux_regulator = devm_regulator_get_optional(dev, "vaux");
++	if (IS_ERR(ov7251->aux_regulator)) {
++		if (PTR_ERR(ov7251->aux_regulator) != -ENODEV)
++			return dev_err_probe(dev, PTR_ERR(ov7251->aux_regulator),
++					     "cannot get auxiliary regulator\n");
++		ov7251->aux_regulator = NULL;
++	}
++	ret = ov7251_get_enable_gpio(ov7251);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot get shared module resets\n");
+ 
+ 	mutex_init(&ov7251->lock);
+ 

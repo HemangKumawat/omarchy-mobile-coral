@@ -1,0 +1,67 @@
+--- a/drivers/media/i2c/imx481.c
++++ b/drivers/media/i2c/imx481.c
+@@ -839,9 +839,19 @@
+ 	struct imx481 *imx481 = to_imx481(sd);
+ 	int ret;
+ 
++	/* Stock Coral custom2/LDO6 shares the retail safety controller rail. */
++	ret = regulator_set_voltage(imx481->auxiliary[1].consumer, 2800000, 2800000);
++	if (ret)
++		return ret;
+ 	ret = regulator_bulk_enable(ARRAY_SIZE(imx481->auxiliary), imx481->auxiliary);
+-	if (ret)
+-		return ret;
++	if (ret) {
++		/* Failed bulk rollback must never remove a powered rail vote. */
++		if (regulator_is_enabled(imx481->auxiliary[1].consumer) != 0) {
++			dev_err(dev, "shared rail state uncertain; 2.8V vote retained\n");
++			return ret;
++		}
++		goto error_safety_vote;
++	}
+ 
+ 	ret = regulator_set_voltage(imx481->vana, IMX481_VANA_MIN_UV,
+ 				    IMX481_VANA_MAX_UV);
+@@ -893,8 +903,13 @@
+ error_vana_voltage:
+ 	regulator_set_voltage(imx481->vana, 0, IMX481_VANA_MAX_UV);
+ error_auxiliary:
+-	regulator_bulk_disable(ARRAY_SIZE(imx481->auxiliary), imx481->auxiliary);
+-
++	if (regulator_bulk_disable(ARRAY_SIZE(imx481->auxiliary), imx481->auxiliary)) {
++		dev_err(dev, "failed to disable auxiliary supplies; shared vote retained\n");
++		return ret;
++	}
++error_safety_vote:
++	if (regulator_set_voltage(imx481->auxiliary[1].consumer, 0, 3200000))
++		dev_err(dev, "failed to release shared safety rail vote\n");
+ 	return ret;
+ }
+ 
+@@ -908,6 +923,7 @@
+ {
+ 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+ 	struct imx481 *imx481 = to_imx481(sd);
++	int ret;
+ 
+ 	gpiod_set_value_cansleep(imx481->reset_gpio, 1);
+ 	clk_disable_unprepare(imx481->inclk);
+@@ -917,9 +933,15 @@
+ 	gpiod_set_value_cansleep(imx481->vana_enable_gpio, 0);
+ 	regulator_disable(imx481->vana);
+ 	regulator_set_voltage(imx481->vana, 0, IMX481_VANA_MAX_UV);
+-	regulator_bulk_disable(ARRAY_SIZE(imx481->auxiliary), imx481->auxiliary);
+-
+-	return 0;
++	ret = regulator_bulk_disable(ARRAY_SIZE(imx481->auxiliary), imx481->auxiliary);
++	if (ret) {
++		dev_err(dev, "power-off failed; shared 2.8V vote retained: %d\n", ret);
++		return ret;
++	}
++	ret = regulator_set_voltage(imx481->auxiliary[1].consumer, 0, 3200000);
++	if (ret)
++		dev_err(dev, "shared safety rail vote release failed: %d\n", ret);
++	return ret;
+ }
+ 
+ /**

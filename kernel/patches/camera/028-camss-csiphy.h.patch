@@ -1,0 +1,50 @@
+--- a/drivers/media/platform/qcom/camss/camss-csiphy.h
++++ b/drivers/media/platform/qcom/camss/camss-csiphy.h
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/clk.h>
+ #include <linux/interrupt.h>
++#include <linux/mutex.h>
+ #include <media/media-entity.h>
+ #include <media/v4l2-device.h>
+ #include <media/v4l2-mediabus.h>
+@@ -33,6 +34,7 @@
+  * @clk:      clock lane configuration (only for D-PHY)
+  */
+ struct csiphy_lanes_cfg {
++	enum v4l2_mbus_type bus_type;
+ 	int num_data;
+ 	struct csiphy_lane *data;
+ 	struct csiphy_lane clk;
+@@ -89,12 +91,22 @@
+ struct csiphy_device_regs {
+ 	const struct csiphy_lane_regs *lane_regs;
+ 	int lane_array_size;
++	const struct csiphy_lane_regs *cphy_lane_regs;
++	int cphy_lane_array_size;
+ 	u32 offset;
+ };
+ 
+ struct csiphy_device {
+ 	struct camss *camss;
+ 	u8 id;
++	/* Two logical routes, one SM8150 PHY3 register/clock/IRQ owner. */
++	struct csiphy_device *shared_phy;
++	struct csiphy_device *combo_peer;
++	struct mutex combo_lock;
++	unsigned int power_users;
++	s64 combo_link_freq;
++	bool powered;
++	bool streaming;
+ 	struct v4l2_subdev subdev;
+ 	struct media_pad pads[MSM_CSIPHY_PADS_NUM];
+ 	void __iomem *base;
+@@ -122,6 +134,8 @@
+ int msm_csiphy_register_entity(struct csiphy_device *csiphy,
+ 			       struct v4l2_device *v4l2_dev);
+ 
++int msm_csiphy_init_combo(struct csiphy_device *csiphy);
++
+ void msm_csiphy_unregister_entity(struct csiphy_device *csiphy);
+ 
+ extern const struct csiphy_formats csiphy_formats_8x16;

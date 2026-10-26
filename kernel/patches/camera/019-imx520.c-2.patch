@@ -1,0 +1,406 @@
+--- a/drivers/media/i2c/imx520.c
++++ b/drivers/media/i2c/imx520.c
+@@ -398,3 +398,403 @@
+  * @code: V4L2 sub-device code enumeration need to be filled
+  *
+  * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_enum_mbus_code(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *sd_state,
++				 struct v4l2_subdev_mbus_code_enum *code)
++{
++	if (code->index > 0)
++		return -EINVAL;
++
++	code->code = supported_mode.code;
++
++	return 0;
++}
++
++/**
++ * imx520_enum_frame_size() - Enumerate V4L2 sub-device frame sizes
++ * @sd: pointer to imx520 V4L2 sub-device structure
++ * @sd_state: V4L2 sub-device configuration
++ * @fsize: V4L2 sub-device size enumeration need to be filled
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_enum_frame_size(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *sd_state,
++				  struct v4l2_subdev_frame_size_enum *fsize)
++{
++	if (fsize->index > 0)
++		return -EINVAL;
++
++	if (fsize->code != supported_mode.code)
++		return -EINVAL;
++
++	fsize->min_width = supported_mode.width;
++	fsize->max_width = fsize->min_width;
++	fsize->min_height = supported_mode.height;
++	fsize->max_height = fsize->min_height;
++
++	return 0;
++}
++
++/**
++ * imx520_fill_pad_format() - Fill subdevice pad format
++ *                            from selected sensor mode
++ * @imx520: pointer to imx520 device
++ * @mode: pointer to imx520_mode sensor mode
++ * @fmt: V4L2 sub-device format need to be filled
++ */
++static void imx520_fill_pad_format(struct imx520 *imx520,
++				   const struct imx520_mode *mode,
++				   struct v4l2_subdev_format *fmt)
++{
++	fmt->format.width = mode->width;
++	fmt->format.height = mode->height;
++	fmt->format.code = mode->code;
++	fmt->format.field = V4L2_FIELD_NONE;
++	fmt->format.colorspace = V4L2_COLORSPACE_RAW;
++	fmt->format.ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
++	fmt->format.quantization = V4L2_QUANTIZATION_DEFAULT;
++	fmt->format.xfer_func = V4L2_XFER_FUNC_NONE;
++}
++
++/**
++ * imx520_get_pad_format() - Get subdevice pad format
++ * @sd: pointer to imx520 V4L2 sub-device structure
++ * @sd_state: V4L2 sub-device configuration
++ * @fmt: V4L2 sub-device format need to be set
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_get_pad_format(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *sd_state,
++				 struct v4l2_subdev_format *fmt)
++{
++	struct imx520 *imx520 = to_imx520(sd);
++
++	mutex_lock(&imx520->mutex);
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
++		struct v4l2_mbus_framefmt *framefmt;
++
++		framefmt = v4l2_subdev_state_get_format(sd_state, fmt->pad);
++		fmt->format = *framefmt;
++	} else {
++		imx520_fill_pad_format(imx520, imx520->cur_mode, fmt);
++	}
++
++	mutex_unlock(&imx520->mutex);
++
++	return 0;
++}
++
++/**
++ * imx520_set_pad_format() - Set subdevice pad format
++ * @sd: pointer to imx520 V4L2 sub-device structure
++ * @sd_state: V4L2 sub-device configuration
++ * @fmt: V4L2 sub-device format need to be set
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_set_pad_format(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *sd_state,
++				 struct v4l2_subdev_format *fmt)
++{
++	struct imx520 *imx520 = to_imx520(sd);
++	const struct imx520_mode *mode;
++	int ret = 0;
++
++	mutex_lock(&imx520->mutex);
++
++	mode = &supported_mode;
++	imx520_fill_pad_format(imx520, mode, fmt);
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
++		struct v4l2_mbus_framefmt *framefmt;
++
++		framefmt = v4l2_subdev_state_get_format(sd_state, fmt->pad);
++		*framefmt = fmt->format;
++	} else {
++		ret = imx520_update_controls(imx520, mode);
++		if (!ret)
++			imx520->cur_mode = mode;
++	}
++
++	mutex_unlock(&imx520->mutex);
++
++	return ret;
++}
++
++static int imx520_get_selection(struct v4l2_subdev *sd,
++				struct v4l2_subdev_state *sd_state,
++				struct v4l2_subdev_selection *sel)
++{
++	if (sel->which != V4L2_SUBDEV_FORMAT_ACTIVE)
++		return -EINVAL;
++
++	switch (sel->target) {
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP:
++		sel->r = (struct v4l2_rect) { 0, 0, 4656, 3496 };
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++/**
++ * imx520_init_state() - Initialize sub-device state
++ * @sd: pointer to imx520 V4L2 sub-device structure
++ * @sd_state: V4L2 sub-device configuration
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_init_state(struct v4l2_subdev *sd,
++			     struct v4l2_subdev_state *sd_state)
++{
++	struct imx520 *imx520 = to_imx520(sd);
++	struct v4l2_subdev_format fmt = { 0 };
++
++	fmt.which = sd_state ? V4L2_SUBDEV_FORMAT_TRY : V4L2_SUBDEV_FORMAT_ACTIVE;
++	imx520_fill_pad_format(imx520, &supported_mode, &fmt);
++
++	return imx520_set_pad_format(sd, sd_state, &fmt);
++}
++
++/**
++ * imx520_start_streaming() - Start sensor stream
++ * @imx520: pointer to imx520 device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_start_streaming(struct imx520 *imx520)
++{
++	const struct imx520_reg_list *reg_list;
++	int ret;
++
++	ret = imx520_write_regs(imx520, imx520_init_regs,
++				ARRAY_SIZE(imx520_init_regs));
++	if (ret) {
++		dev_err(imx520->dev, "failed to write global registers\n");
++		return ret;
++	}
++
++	/* Write sensor mode registers */
++	reg_list = &imx520->cur_mode->reg_list;
++	ret = imx520_write_regs(imx520, reg_list->regs,
++				reg_list->num_of_regs);
++	if (ret) {
++		dev_err(imx520->dev, "failed to write mode registers\n");
++		return ret;
++	}
++
++	/* Setup handler will write actual exposure and gain */
++	ret =  __v4l2_ctrl_handler_setup(imx520->sd.ctrl_handler);
++	if (ret) {
++		dev_err(imx520->dev, "fail to setup handler\n");
++		return ret;
++	}
++
++	/* Start streaming */
++	ret = imx520_write_reg(imx520, IMX520_REG_MODE_SELECT,
++			       1, IMX520_MODE_STREAMING);
++	if (ret) {
++		dev_err(imx520->dev, "failed to start streaming\n");
++		return ret;
++	}
++
++	dev_info(imx520->dev, "streaming 4656x3496 RAW10 over four-lane D-PHY\n");
++
++	return 0;
++}
++
++/**
++ * imx520_stop_streaming() - Stop sensor stream
++ * @imx520: pointer to imx520 device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_stop_streaming(struct imx520 *imx520)
++{
++	return imx520_write_reg(imx520, IMX520_REG_MODE_SELECT,
++				1, IMX520_MODE_STANDBY);
++}
++
++/**
++ * imx520_set_stream() - Enable sensor streaming
++ * @sd: pointer to imx520 subdevice
++ * @enable: set to enable sensor streaming
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_set_stream(struct v4l2_subdev *sd, int enable)
++{
++	struct imx520 *imx520 = to_imx520(sd);
++	int ret;
++
++	mutex_lock(&imx520->mutex);
++
++	if (enable) {
++		ret = pm_runtime_resume_and_get(imx520->dev);
++		if (ret)
++			goto error_unlock;
++
++		ret = imx520_start_streaming(imx520);
++		if (ret)
++			goto error_power_off;
++	} else {
++		imx520_stop_streaming(imx520);
++		pm_runtime_put(imx520->dev);
++	}
++
++	mutex_unlock(&imx520->mutex);
++
++	return 0;
++
++error_power_off:
++	pm_runtime_put(imx520->dev);
++error_unlock:
++	mutex_unlock(&imx520->mutex);
++
++	return ret;
++}
++
++/**
++ * imx520_detect() - Detect imx520 sensor
++ * @imx520: pointer to imx520 device
++ *
++ * Return: 0 if successful, -EIO if sensor id does not match
++ */
++static int imx520_detect(struct imx520 *imx520)
++{
++	int ret;
++	u32 val;
++
++	ret = imx520_read_reg(imx520, IMX520_REG_ID, 2, &val);
++	if (ret)
++		return ret;
++
++	if (val != IMX520_ID) {
++		dev_err(imx520->dev, "chip id mismatch: %x!=%x\n",
++			IMX520_ID, val);
++		return -ENXIO;
++	}
++
++	dev_info(imx520->dev, "coral-camera chip-id=0x%04x\n", val);
++	return 0;
++}
++
++/**
++ * imx520_parse_hw_config() - Parse HW configuration and check if supported
++ * @imx520: pointer to imx520 device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_parse_hw_config(struct imx520 *imx520)
++{
++	struct fwnode_handle *fwnode = dev_fwnode(imx520->dev);
++	struct v4l2_fwnode_endpoint bus_cfg = {
++		.bus_type = V4L2_MBUS_CSI2_DPHY
++	};
++	struct fwnode_handle *ep;
++	unsigned long rate;
++	unsigned int i;
++	int ret;
++
++	if (!fwnode)
++		return -ENXIO;
++
++	/* The GPIO values are logical; reset is active low in the DT. */
++	imx520->reset_gpio = devm_gpiod_get(imx520->dev, "reset",
++					    GPIOD_OUT_HIGH);
++	if (IS_ERR(imx520->reset_gpio)) {
++		dev_err(imx520->dev, "failed to get reset gpio %ld\n",
++			PTR_ERR(imx520->reset_gpio));
++		return PTR_ERR(imx520->reset_gpio);
++	}
++
++	imx520->vana_enable_gpio = devm_gpiod_get_optional(imx520->dev, "vana-enable",
++						  GPIOD_OUT_LOW);
++	if (IS_ERR(imx520->vana_enable_gpio))
++		return dev_err_probe(imx520->dev,
++				     PTR_ERR(imx520->vana_enable_gpio),
++				     "failed to get VANA enable GPIO\n");
++
++	/* Get sensor input clock */
++	imx520->inclk = devm_clk_get(imx520->dev, NULL);
++	if (IS_ERR(imx520->inclk)) {
++		dev_err(imx520->dev, "could not get inclk\n");
++		return PTR_ERR(imx520->inclk);
++	}
++
++	ret = clk_set_rate(imx520->inclk, IMX520_INCLK_RATE);
++	if (ret)
++		return dev_err_probe(imx520->dev, ret,
++				     "could not set 24 MHz input clock\n");
++
++	rate = clk_get_rate(imx520->inclk);
++	if (rate != IMX520_INCLK_RATE) {
++		dev_err(imx520->dev, "inclk frequency mismatch\n");
++		return -EINVAL;
++	}
++
++	imx520->vana = devm_regulator_get(imx520->dev, "vana");
++	if (IS_ERR(imx520->vana))
++		return dev_err_probe(imx520->dev, PTR_ERR(imx520->vana),
++				     "failed to get VANA\n");
++
++	imx520->vdig = devm_regulator_get(imx520->dev, "vdig");
++	if (IS_ERR(imx520->vdig))
++		return dev_err_probe(imx520->dev, PTR_ERR(imx520->vdig),
++				     "failed to get VDIG\n");
++
++	imx520->vio = devm_regulator_get(imx520->dev, "vio");
++	if (IS_ERR(imx520->vio))
++		return dev_err_probe(imx520->dev, PTR_ERR(imx520->vio),
++				     "failed to get VIO\n");
++
++	imx520->auxiliary[0].supply = "vextra0";
++	imx520->auxiliary[1].supply = "vextra1";
++	ret = devm_regulator_bulk_get(imx520->dev, ARRAY_SIZE(imx520->auxiliary),
++				      imx520->auxiliary);
++	if (ret)
++		return dev_err_probe(imx520->dev, ret, "failed to get module supplies\n");
++
++	ep = fwnode_graph_get_next_endpoint(fwnode, NULL);
++	if (!ep)
++		return -ENXIO;
++
++	ret = v4l2_fwnode_endpoint_alloc_parse(ep, &bus_cfg);
++	fwnode_handle_put(ep);
++	if (ret)
++		return ret;
++
++	if (bus_cfg.bus_type != V4L2_MBUS_CSI2_DPHY) {
++		dev_err(imx520->dev, "endpoint must use D-PHY\n");
++		ret = -EINVAL;
++		goto done_endpoint_free;
++	}
++
++	if (bus_cfg.bus.mipi_csi2.num_data_lanes != IMX520_NUM_DATA_LANES) {
++		dev_err(imx520->dev,
++			"number of CSI2 data lanes %d is not supported\n",
++			bus_cfg.bus.mipi_csi2.num_data_lanes);
++		ret = -EINVAL;
++		goto done_endpoint_free;
++	}
++
++	if (!bus_cfg.nr_of_link_frequencies) {
++		dev_err(imx520->dev, "no link frequencies defined\n");
++		ret = -EINVAL;
++		goto done_endpoint_free;
++	}
++
++	for (i = 0; i < bus_cfg.nr_of_link_frequencies; i++)
++		if (bus_cfg.link_frequencies[i] == IMX520_LINK_FREQ)
++			goto done_endpoint_free;
++
++	ret = -EINVAL;
++
++done_endpoint_free:

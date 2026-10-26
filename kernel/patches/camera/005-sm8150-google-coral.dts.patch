@@ -1,0 +1,8 @@
+--- a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+@@ -271,3 +271,5 @@
+ };
+ 
+ #include "sm8150-google-coral-audio.dtsi"
++
++#include "sm8150-google-coral-cameras.dtsi"

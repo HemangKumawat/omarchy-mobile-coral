@@ -1,0 +1,41 @@
+--- a/drivers/regulator/max77826-regulator.c
++++ b/drivers/regulator/max77826-regulator.c
+@@ -229,7 +229,7 @@
+ 
+ 	res = regmap_read(regmap, MAX77826_REG_DEVICE_ID, &device_id);
+ 	if (!res)
+-		dev_dbg(dev, "DEVICE_ID: 0x%x\n", device_id);
++		dev_info(dev, "coral-camera pmic-id=0x%02x\n", device_id);
+ 
+ 	return res;
+ }
+@@ -257,6 +257,8 @@
+ 	info->regmap = regmap;
+ 
+ 	info->enable_gpio = of_get_named_gpio(dev->of_node, "maxim,enable-gpio", 0);
++	if (info->enable_gpio < 0 && info->enable_gpio != -ENOENT)
++		return dev_err_probe(dev, info->enable_gpio, "camera PMIC enable GPIO unavailable\n");
+ 	if (gpio_is_valid(info->enable_gpio)) {
+ 		rc = devm_gpio_request_one(dev, info->enable_gpio, 
+ 					   GPIOF_OUT_INIT_HIGH, "MAX77826 ENABLE");
+@@ -267,6 +269,11 @@
+ 		}
+ 	}
+ 
++	/* Do not publish camera rails until the enabled PMIC answers. */
++	rc = max77826_read_device_id(regmap, dev);
++	if (rc)
++		return dev_err_probe(dev, rc, "camera PMIC did not respond\n");
++
+ 	i2c_set_clientdata(client, info);
+ 
+ 	config.dev = dev;
+@@ -283,7 +290,7 @@
+ 		}
+ 	}
+ 
+-	return max77826_read_device_id(regmap, dev);
++	return 0;
+ }
+ 
+ static void max77826_i2c_remove(struct i2c_client *client)

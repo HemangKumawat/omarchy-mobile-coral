@@ -1,0 +1,406 @@
+--- a/drivers/media/i2c/imx363.c
++++ b/drivers/media/i2c/imx363.c
+@@ -798,3 +798,403 @@
+ 				 struct v4l2_subdev_format *fmt)
+ {
+ 	struct imx363 *imx363 = to_imx363(sd);
++	int ret;
++
++	mutex_lock(&imx363->mutex);
++	ret = __imx363_get_pad_format(imx363, sd_state, fmt);
++	mutex_unlock(&imx363->mutex);
++
++	return ret;
++}
++
++static int imx363_set_pad_format(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *sd_state,
++				 struct v4l2_subdev_format *fmt)
++{
++	struct imx363 *imx363 = to_imx363(sd);
++	const struct imx363_link_freq_config *link_freq_cfgs;
++	const struct imx363_link_cfg *link_cfg;
++	struct v4l2_mbus_framefmt *framefmt;
++	const struct imx363_mode *mode;
++	s32 vblank_def;
++	s32 vblank_min;
++	s64 h_blank;
++	s64 pixel_rate;
++	s64 link_freq;
++
++	mutex_lock(&imx363->mutex);
++
++	fmt->format.code = imx363_get_format_code(imx363);
++
++	mode = v4l2_find_nearest_size(supported_modes,
++		ARRAY_SIZE(supported_modes), width, height,
++		fmt->format.width, fmt->format.height);
++	imx363_update_pad_format(imx363, mode, fmt);
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
++		framefmt = v4l2_subdev_state_get_format(sd_state, fmt->pad);
++		*framefmt = fmt->format;
++	} else {
++		imx363->cur_mode = mode;
++		__v4l2_ctrl_s_ctrl(imx363->link_freq, mode->link_freq_index);
++
++		link_freq = imx363->link_freq_menu_items[mode->link_freq_index];
++		link_freq_cfgs =
++			&imx363->link_freq_configs[mode->link_freq_index];
++
++		link_cfg = &link_freq_cfgs->link_cfg[imx363->lane_mode_idx];
++		pixel_rate = link_freq_to_pixel_rate(link_freq, link_cfg);
++		__v4l2_ctrl_modify_range(imx363->pixel_rate, pixel_rate,
++					 pixel_rate, 1, pixel_rate);
++		/* Update limits and set FPS to default */
++		vblank_def = imx363->cur_mode->vts_def -
++			     imx363->cur_mode->height;
++		vblank_min = imx363->cur_mode->vts_min -
++			     imx363->cur_mode->height;
++		__v4l2_ctrl_modify_range(
++			imx363->vblank, vblank_min,
++			IMX363_VTS_MAX - imx363->cur_mode->height, 1,
++			vblank_def);
++		__v4l2_ctrl_s_ctrl(imx363->vblank, vblank_def);
++		h_blank =
++			imx363->link_freq_configs[mode->link_freq_index].pixels_per_line
++			 - imx363->cur_mode->width;
++		__v4l2_ctrl_modify_range(imx363->hblank, h_blank,
++					 h_blank, 1, h_blank);
++	}
++
++	mutex_unlock(&imx363->mutex);
++
++	return 0;
++}
++
++static const struct v4l2_rect *
++__imx363_get_pad_crop(struct imx363 *imx363,
++		      struct v4l2_subdev_state *sd_state,
++		      unsigned int pad, enum v4l2_subdev_format_whence which)
++{
++	switch (which) {
++	case V4L2_SUBDEV_FORMAT_TRY:
++		return v4l2_subdev_state_get_crop(sd_state, pad);
++	case V4L2_SUBDEV_FORMAT_ACTIVE:
++		return &imx363->cur_mode->crop;
++	}
++
++	return NULL;
++}
++
++static int imx363_get_selection(struct v4l2_subdev *sd,
++				struct v4l2_subdev_state *sd_state,
++				struct v4l2_subdev_selection *sel)
++{
++	switch (sel->target) {
++	case V4L2_SEL_TGT_CROP: {
++		struct imx363 *imx363 = to_imx363(sd);
++
++		mutex_lock(&imx363->mutex);
++		sel->r = *__imx363_get_pad_crop(imx363, sd_state, sel->pad,
++						sel->which);
++		mutex_unlock(&imx363->mutex);
++
++		return 0;
++	}
++
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++		sel->r.left = 0;
++		sel->r.top = 0;
++		sel->r.width = IMX363_NATIVE_WIDTH;
++		sel->r.height = IMX363_NATIVE_HEIGHT;
++
++		return 0;
++
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++		sel->r.left = IMX363_PIXEL_ARRAY_LEFT;
++		sel->r.top = IMX363_PIXEL_ARRAY_TOP;
++		sel->r.width = IMX363_PIXEL_ARRAY_WIDTH;
++		sel->r.height = IMX363_PIXEL_ARRAY_HEIGHT;
++
++		return 0;
++	}
++
++	return -EINVAL;
++}
++
++/* Start streaming */
++static int imx363_start_streaming(struct imx363 *imx363)
++{
++	struct i2c_client *client = v4l2_get_subdevdata(&imx363->sd);
++	const struct imx363_reg_list *reg_list;
++	const struct imx363_link_freq_config *link_freq_cfg;
++	int ret, link_freq_index;
++
++	ret = cci_write(imx363->regmap, IMX363_REG_RESET, 0x01, NULL);
++	if (ret) {
++		dev_err(&client->dev, "%s failed to reset sensor\n", __func__);
++		return ret;
++	}
++
++	/* 12ms is required from poweron to standby */
++	fsleep(12000);
++
++	/* Setup PLL */
++	link_freq_index = imx363->cur_mode->link_freq_index;
++	link_freq_cfg = &imx363->link_freq_configs[link_freq_index];
++
++	reg_list = &link_freq_cfg->link_cfg[imx363->lane_mode_idx].reg_list;
++	ret = cci_multi_reg_write(imx363->regmap, reg_list->regs, reg_list->num_of_regs, NULL);
++	if (ret) {
++		dev_err(&client->dev, "%s failed to set plls\n", __func__);
++		return ret;
++	}
++
++	ret = cci_multi_reg_write(imx363->regmap, mode_common_regs,
++				  ARRAY_SIZE(mode_common_regs), NULL);
++	if (ret) {
++		dev_err(&client->dev, "%s failed to set common regs\n", __func__);
++		return ret;
++	}
++
++	ret = cci_write(imx363->regmap, IMX363_CLK_BLANK_STOP,
++			!!(imx363->csi2_flags & V4L2_MBUS_CSI2_NONCONTINUOUS_CLOCK),
++			NULL);
++	if (ret) {
++		dev_err(&client->dev, "%s failed to set clock lane mode\n", __func__);
++		return ret;
++	}
++
++	/* Apply default values of current mode */
++	reg_list = &imx363->cur_mode->reg_list;
++	ret = cci_multi_reg_write(imx363->regmap, reg_list->regs, reg_list->num_of_regs, NULL);
++	if (ret) {
++		dev_err(&client->dev, "%s failed to set mode\n", __func__);
++		return ret;
++	}
++
++	/* Apply customized values from user */
++	ret =  __v4l2_ctrl_handler_setup(imx363->sd.ctrl_handler);
++	if (ret)
++		return ret;
++
++	/* set stream on register */
++	return cci_write(imx363->regmap, IMX363_REG_MODE_SELECT,
++			 IMX363_MODE_STREAMING, NULL);
++}
++
++/* Stop streaming */
++static int imx363_stop_streaming(struct imx363 *imx363)
++{
++	struct i2c_client *client = v4l2_get_subdevdata(&imx363->sd);
++	int ret;
++
++	/* set stream off register */
++	ret = cci_write(imx363->regmap, IMX363_REG_MODE_SELECT,
++			IMX363_MODE_STANDBY, NULL);
++	if (ret)
++		dev_err(&client->dev, "%s failed to set stream\n", __func__);
++
++	/*
++	 * Return success even if it was an error, as there is nothing the
++	 * caller can do about it.
++	 */
++	return 0;
++}
++
++static int imx363_power_on(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx363 *imx363 = to_imx363(sd);
++	int ret;
++
++	ret = regulator_bulk_enable(IMX363_NUM_SUPPLIES,
++				    imx363->supplies);
++	if (ret) {
++		dev_err(dev, "%s: failed to enable regulators\n",
++			__func__);
++		return ret;
++	}
++
++	usleep_range(400, 600);
++
++	gpiod_set_value_cansleep(imx363->reset_gpio, 1);
++
++	ret = clk_prepare_enable(imx363->clk);
++	if (ret) {
++		dev_err(dev, "failed to enable clock\n");
++		regulator_bulk_disable(IMX363_NUM_SUPPLIES, imx363->supplies);
++	}
++
++	usleep_range(1000, 1200);
++
++	return 0;
++}
++
++static int imx363_power_off(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx363 *imx363 = to_imx363(sd);
++
++	clk_disable_unprepare(imx363->clk);
++
++	gpiod_set_value_cansleep(imx363->reset_gpio, 0);
++
++	regulator_bulk_disable(IMX363_NUM_SUPPLIES, imx363->supplies);
++
++	return 0;
++}
++
++static int imx363_set_stream(struct v4l2_subdev *sd, int enable)
++{
++	struct imx363 *imx363 = to_imx363(sd);
++	struct i2c_client *client = v4l2_get_subdevdata(sd);
++	int ret = 0;
++
++	mutex_lock(&imx363->mutex);
++
++	if (enable) {
++		ret = pm_runtime_resume_and_get(&client->dev);
++		if (ret < 0)
++			goto err_unlock;
++
++		/*
++		 * Apply default & customized values
++		 * and then start streaming.
++		 */
++		ret = imx363_start_streaming(imx363);
++		if (ret)
++			goto err_rpm_put;
++	} else {
++		imx363_stop_streaming(imx363);
++		pm_runtime_put(&client->dev);
++	}
++
++	mutex_unlock(&imx363->mutex);
++
++	return ret;
++
++err_rpm_put:
++	pm_runtime_put(&client->dev);
++err_unlock:
++	mutex_unlock(&imx363->mutex);
++
++	return ret;
++}
++
++/* Verify chip ID */
++static int imx363_identify_module(struct imx363 *imx363)
++{
++	struct i2c_client *client = v4l2_get_subdevdata(&imx363->sd);
++	int ret;
++	u64 val;
++
++	ret = cci_read(imx363->regmap, IMX363_REG_CHIP_ID,
++		       &val, NULL);
++	if (ret) {
++		dev_err(&client->dev, "failed to read chip id %x\n",
++			IMX363_CHIP_ID);
++		return ret;
++	}
++
++	if (val != IMX363_CHIP_ID) {
++		dev_err(&client->dev, "chip id mismatch: %x!=%llx\n",
++			IMX363_CHIP_ID, val);
++		return -EIO;
++	}
++
++	dev_info(&client->dev, "coral-camera chip-id=0x%04llx\n", val);
++	return 0;
++}
++
++static const struct v4l2_subdev_video_ops imx363_video_ops = {
++	.s_stream = imx363_set_stream,
++};
++
++static const struct v4l2_subdev_pad_ops imx363_pad_ops = {
++	.enum_mbus_code = imx363_enum_mbus_code,
++	.get_fmt = imx363_get_pad_format,
++	.set_fmt = imx363_set_pad_format,
++	.enum_frame_size = imx363_enum_frame_size,
++	.get_selection = imx363_get_selection,
++};
++
++static const struct v4l2_subdev_ops imx363_subdev_ops = {
++	.video = &imx363_video_ops,
++	.pad = &imx363_pad_ops,
++};
++
++static const struct v4l2_subdev_internal_ops imx363_internal_ops = {
++	.open = imx363_open,
++};
++
++/* Initialize control handlers */
++static int imx363_init_controls(struct imx363 *imx363)
++{
++	struct i2c_client *client = v4l2_get_subdevdata(&imx363->sd);
++	const struct imx363_link_freq_config *link_freq_cfgs;
++	struct v4l2_fwnode_device_properties props;
++	struct v4l2_ctrl_handler *ctrl_hdlr;
++	const struct imx363_link_cfg *link_cfg;
++	s64 vblank_def;
++	s64 vblank_min;
++	s64 pixel_rate;
++	int ret;
++
++	ctrl_hdlr = &imx363->ctrl_handler;
++	ret = v4l2_ctrl_handler_init(ctrl_hdlr, 13);
++	if (ret)
++		return ret;
++
++	mutex_init(&imx363->mutex);
++	ctrl_hdlr->lock = &imx363->mutex;
++	imx363->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr,
++				&imx363_ctrl_ops,
++				V4L2_CID_LINK_FREQ,
++				ARRAY_SIZE(link_freq_menu_items_24) - 1,
++				0,
++				imx363->link_freq_menu_items);
++
++	if (imx363->link_freq)
++		imx363->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	imx363->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx363_ctrl_ops,
++					  V4L2_CID_HFLIP, 0, 1, 1, 1);
++	if (imx363->hflip)
++		imx363->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
++
++	imx363->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx363_ctrl_ops,
++					  V4L2_CID_VFLIP, 0, 1, 1, 1);
++	if (imx363->vflip)
++		imx363->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
++
++	link_freq_cfgs = &imx363->link_freq_configs[0];
++	link_cfg = link_freq_cfgs[imx363->lane_mode_idx].link_cfg;
++	pixel_rate = link_freq_to_pixel_rate(imx363->link_freq_menu_items[0],
++					     link_cfg);
++	printk(KERN_INFO "imx363: pixel_rate: %lld\n", pixel_rate);
++
++	/* By default, PIXEL_RATE is read only */
++	imx363->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &imx363_ctrl_ops,
++				V4L2_CID_PIXEL_RATE,
++				pixel_rate, pixel_rate,
++				1, pixel_rate);
++
++	vblank_def = imx363->cur_mode->vts_def - imx363->cur_mode->height;
++	vblank_min = imx363->cur_mode->vts_min - imx363->cur_mode->height;
++	imx363->vblank = v4l2_ctrl_new_std(
++				ctrl_hdlr, &imx363_ctrl_ops, V4L2_CID_VBLANK,
++				vblank_min,
++				IMX363_VTS_MAX - imx363->cur_mode->height, 1,
++				vblank_def);
++
++	imx363->hblank = v4l2_ctrl_new_std(
++				ctrl_hdlr, &imx363_ctrl_ops, V4L2_CID_HBLANK,
++				IMX363_PPL_DEFAULT - imx363->cur_mode->width,
++				IMX363_PPL_DEFAULT - imx363->cur_mode->width,
++				1,
++				IMX363_PPL_DEFAULT - imx363->cur_mode->width);
++
++	if (imx363->hblank)
++		imx363->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	imx363->exposure = v4l2_ctrl_new_std(
++				ctrl_hdlr, &imx363_ctrl_ops,
++				V4L2_CID_EXPOSURE, IMX363_EXPOSURE_MIN,

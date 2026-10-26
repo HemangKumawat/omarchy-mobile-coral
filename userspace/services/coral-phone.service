@@ -1,0 +1,18 @@
+[Unit]
+Description=Coral daily phone policy
+After=systemd-user-sessions.service systemd-modules-load.service coral-hexagonrpcd.service
+Wants=coral-hexagonrpcd.service
+
+[Service]
+Type=simple
+Environment="MALLOC_ARENA_MAX=1"
+Environment="PHONE_EDGE_TOP=omarchy-shell omamobile.bar pullDown"
+Environment="PHONE_EDGE_BOTTOM=omarchy-shell shell summon omamobile.launcher '{}'"
+ExecStartPre=-/usr/local/bin/coral-vendor --bt-address
+ExecStart=/usr/local/bin/coral-phone daily
+Restart=on-failure
+# timeout-policy: PROBE
+RestartSec=10
+
+[Install]
+WantedBy=graphical.target

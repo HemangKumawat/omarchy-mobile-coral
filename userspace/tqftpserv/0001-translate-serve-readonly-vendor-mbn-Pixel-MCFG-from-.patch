@@ -1,0 +1,41 @@
+From c5c517bd19f7890549d1a750587208496c2a9f0c Mon Sep 17 00:00:00 2001
+From: Hemang Kumawat <HemangKumawat@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 01:30:10 +0200
+Subject: [PATCH] translate: serve /readonly/vendor/mbn/ (Pixel MCFG) from
+ <rproc fw dir>/mbn
+
+---
+ translate.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/translate.c b/translate.c
+index 912fe56..5492774 100644
+--- a/translate.c
++++ b/translate.c
+@@ -25,6 +25,8 @@
+ #define READONLY_FW_BASE	"/readonly/firmware/"
+ #define READONLY_MODEM_PATH	READONLY_FW_BASE "modem_pr"
+ #define READONLY_VENDOR_PATH		"/readonly/vendor/firmware/"
++/* coral: Pixel modems read MCFG from /readonly/vendor/mbn/ (Android: /vendor/rfs/msm/mpss/readonly/vendor/mbn) */
++#define READONLY_VENDOR_MBN_PATH	"/readonly/vendor/mbn/"
+ #define READONLY_VENDOR_MNT_PATH	"/readonly/vendor/firmware_mnt/image/"
+ 
+ #ifndef ANDROID
+@@ -225,6 +227,14 @@ int translate_open(const char *path, int flags)
+ 		return translate_readonly(path + strlen(READONLY_FW_BASE));
+ 	else if (!strncmp(path, READWRITE_PATH, strlen(READWRITE_PATH)))
+ 		return translate_readwrite(path + strlen(READWRITE_PATH), flags);
++	else if (!strncmp(path, READONLY_VENDOR_MBN_PATH, strlen(READONLY_VENDOR_MBN_PATH))) {
++		/* served from <remoteproc fw dir>/mbn/...; refuse traversal out of it */
++		if (strstr(path, "..")) {
++			errno = EACCES;
++			return -1;
++		}
++		return translate_readonly(path + strlen("/readonly/vendor/"));
++	}
+ 	else if (!strncmp(path, READONLY_VENDOR_MNT_PATH, strlen(READONLY_VENDOR_MNT_PATH)))
+ 		return translate_readonly(path + strlen(READONLY_VENDOR_MNT_PATH));
+ 	else if (!strncmp(path, READONLY_VENDOR_PATH, strlen(READONLY_VENDOR_PATH)))
+-- 
+2.55.0
+

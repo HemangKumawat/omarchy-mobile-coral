@@ -1,0 +1,56 @@
+--- a/Documentation/devicetree/bindings/media/i2c/ovti,ov7251.yaml
++++ b/Documentation/devicetree/bindings/media/i2c/ovti,ov7251.yaml
+@@ -45,6 +45,33 @@
+       Reference to the GPIO connected to the XSHUTDOWN pin, if any. Polarity
+       is GPIO_ACTIVE_HIGH.
+ 
++  rotation: true
++
++  orientation: true
++
++  peer-enable-gpios:
++    maxItems: 1
++    description: Peer XSHUTDOWN owned by the module lead, held low at probe.
++
++  ovti,reset-provider:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: Module lead providing this sensor's peer XSHUTDOWN descriptor.
++
++  ovti,probe-address:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    const: 96
++    description: Factory SCCB address before primary and secondary aliases are reassigned.
++
++  ovti,fsin-role:
++    enum: ["off", master, slave]
++    description:
++      Optional wired frame synchronization through the FSIN/VSYNC pin.
++      Master drives VSYNC, slave accepts FSIN, and off leaves free running.
++      Optical strobe output is disabled for all roles. Omit to disable sync.
++
++  vaux-supply:
++    description: Optional module auxiliary supply.
++
+   port:
+     description: Digital Output Port
+     $ref: /schemas/graph.yaml#/$defs/port-base
+@@ -67,6 +94,19 @@
+         required:
+           - data-lanes
+           - link-frequencies
++
++allOf:
++  - if:
++      required: [ovti,reset-provider]
++    then:
++      properties:
++        enable-gpios: false
++        peer-enable-gpios: false
++      required: [ovti,probe-address]
++  - if:
++      required: [peer-enable-gpios]
++    then:
++      required: [enable-gpios, ovti,probe-address]
+ 
+ required:
+   - compatible

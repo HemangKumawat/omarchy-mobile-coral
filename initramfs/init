@@ -1,0 +1,56 @@
+#!/bin/busybox sh
+# RAM-only rescue: never mount or write a phone partition.
+set -eu
+/bin/busybox --install -s /bin
+mkdir -p /proc /sys /dev /run /tmp
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /run
+say() { echo "[coral-safe] $*"; echo "[coral-safe] $*" > /dev/kmsg; }
+fail() {
+    trap - EXIT HUP INT TERM
+    say "$*; returning to bootloader"
+    /bin/reboot-bootloader || { echo 1 > /proc/sys/kernel/sysrq; echo b > /proc/sysrq-trigger; }
+    exit 1
+}
+trap 'fail "init failed"' EXIT HUP INT TERM
+# timeout-policy: PROBE (12 probe intervals allow driver enumeration and host access)
+T_PROBE=10
+USB_TIMEOUT=$((T_PROBE * 12))
+( sleep "$USB_TIMEOUT"; fail "rescue lease expired" ) &
+say "kernel $(uname -r); rescue lease ${USB_TIMEOUT}s"
+if [ -c /dev/watchdog0 ]; then
+    watchdog -T "$((T_PROBE * 2))" -t "$((T_PROBE / 2))" /dev/watchdog0
+    say "SoC watchdog armed"
+else
+    say "SoC watchdog device absent; software reboot deadline remains armed"
+fi
+mount -t configfs configfs /sys/kernel/config
+i=0
+while [ -z "$(ls /sys/class/udc)" ]; do
+    [ "$i" -lt "$((T_PROBE * 3))" ] || fail "no USB device controller"
+    sleep 1
+    i=$((i + 1))
+done
+UDC=$(ls /sys/class/udc | head -1)
+G=/sys/kernel/config/usb_gadget/coral_safe
+mkdir -p "$G/strings/0x409" "$G/configs/c.1/strings/0x409" \
+    "$G/functions/acm.usb0" "$G/functions/ecm.usb0"
+echo 0x18d1 > "$G/idVendor"
+echo 0x4ee3 > "$G/idProduct"
+echo "${CORAL_USB_SERIAL:-coral-rescue}" > "$G/strings/0x409/serialnumber"
+echo coral-safe-rescue > "$G/strings/0x409/product"
+echo 'ACM + ECM rescue' > "$G/configs/c.1/strings/0x409/configuration"
+echo 02:00:00:00:42:01 > "$G/functions/ecm.usb0/dev_addr"
+echo 02:00:00:00:42:02 > "$G/functions/ecm.usb0/host_addr"
+ln -s "$G/functions/acm.usb0" "$G/configs/c.1/"
+ln -s "$G/functions/ecm.usb0" "$G/configs/c.1/"
+echo "$UDC" > "$G/UDC"
+ip addr add 172.16.42.1/30 dev usb0
+ip link set usb0 up
+say "USB ACM + ECM bound to $UDC; no partitions mounted"
+while true; do
+    setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1' || say "serial shell disconnected"
+    sleep 1
+done

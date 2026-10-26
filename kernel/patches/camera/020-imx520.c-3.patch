@@ -1,0 +1,371 @@
+--- a/drivers/media/i2c/imx520.c
++++ b/drivers/media/i2c/imx520.c
+@@ -798,3 +798,368 @@
+ 	ret = -EINVAL;
+ 
+ done_endpoint_free:
++	v4l2_fwnode_endpoint_free(&bus_cfg);
++
++	return ret;
++}
++
++/* V4l2 subdevice ops */
++static const struct v4l2_subdev_video_ops imx520_video_ops = {
++	.s_stream = imx520_set_stream,
++};
++
++static const struct v4l2_subdev_pad_ops imx520_pad_ops = {
++	.enum_mbus_code = imx520_enum_mbus_code,
++	.enum_frame_size = imx520_enum_frame_size,
++	.get_fmt = imx520_get_pad_format,
++	.set_fmt = imx520_set_pad_format,
++	.get_selection = imx520_get_selection,
++};
++
++static const struct v4l2_subdev_ops imx520_subdev_ops = {
++	.video = &imx520_video_ops,
++	.pad = &imx520_pad_ops,
++};
++
++static const struct v4l2_subdev_internal_ops imx520_internal_ops = {
++	.init_state = imx520_init_state,
++};
++
++/**
++ * imx520_power_on() - Sensor power on sequence
++ * @dev: pointer to i2c device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_power_on(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx520 *imx520 = to_imx520(sd);
++	int ret;
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(imx520->auxiliary), imx520->auxiliary);
++	if (ret)
++		return ret;
++
++	ret = regulator_set_voltage(imx520->vana, IMX520_VANA_MIN_UV,
++				    IMX520_VANA_MAX_UV);
++	if (ret)
++		goto error_auxiliary;
++
++	ret = regulator_enable(imx520->vana);
++	if (ret)
++		goto error_vana_voltage;
++
++	gpiod_set_value_cansleep(imx520->vana_enable_gpio, 1);
++	usleep_range(1000, 2000);
++
++	ret = regulator_set_load(imx520->vdig, IMX520_VDIG_LOAD_UA);
++	if (ret)
++		goto error_vana;
++
++	ret = regulator_enable(imx520->vdig);
++	if (ret)
++		goto error_vdig_load;
++	usleep_range(1000, 2000);
++
++	ret = regulator_enable(imx520->vio);
++	if (ret)
++		goto error_vdig;
++	usleep_range(1000, 2000);
++
++	ret = clk_prepare_enable(imx520->inclk);
++	if (ret) {
++		dev_err(imx520->dev, "failed to enable input clock\n");
++		goto error_vio;
++	}
++
++	usleep_range(1000, 1200);
++	gpiod_set_value_cansleep(imx520->reset_gpio, 0);
++	usleep_range(1000, 2000);
++
++	return 0;
++
++error_vio:
++	regulator_disable(imx520->vio);
++error_vdig:
++	regulator_disable(imx520->vdig);
++error_vdig_load:
++	regulator_set_load(imx520->vdig, 0);
++error_vana:
++	gpiod_set_value_cansleep(imx520->vana_enable_gpio, 0);
++	regulator_disable(imx520->vana);
++error_vana_voltage:
++	regulator_set_voltage(imx520->vana, 0, IMX520_VANA_MAX_UV);
++error_auxiliary:
++	regulator_bulk_disable(ARRAY_SIZE(imx520->auxiliary), imx520->auxiliary);
++
++	return ret;
++}
++
++/**
++ * imx520_power_off() - Sensor power off sequence
++ * @dev: pointer to i2c device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_power_off(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx520 *imx520 = to_imx520(sd);
++
++	gpiod_set_value_cansleep(imx520->reset_gpio, 1);
++	clk_disable_unprepare(imx520->inclk);
++	regulator_disable(imx520->vio);
++	regulator_disable(imx520->vdig);
++	regulator_set_load(imx520->vdig, 0);
++	gpiod_set_value_cansleep(imx520->vana_enable_gpio, 0);
++	regulator_disable(imx520->vana);
++	regulator_set_voltage(imx520->vana, 0, IMX520_VANA_MAX_UV);
++	regulator_bulk_disable(ARRAY_SIZE(imx520->auxiliary), imx520->auxiliary);
++
++	return 0;
++}
++
++/**
++ * imx520_init_controls() - Initialize sensor subdevice controls
++ * @imx520: pointer to imx520 device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_init_controls(struct imx520 *imx520)
++{
++	struct v4l2_ctrl_handler *ctrl_hdlr = &imx520->ctrl_handler;
++	const struct imx520_mode *mode = imx520->cur_mode;
++	struct v4l2_fwnode_device_properties props;
++	u32 lpfr;
++	int ret;
++
++	ret = v4l2_ctrl_handler_init(ctrl_hdlr, 8);
++	if (ret)
++		return ret;
++
++	/* Serialize controls with sensor device */
++	ctrl_hdlr->lock = &imx520->mutex;
++
++	/* Initialize exposure and gain */
++	lpfr = mode->vblank + mode->height;
++	imx520->exp_ctrl = v4l2_ctrl_new_std(ctrl_hdlr,
++					     &imx520_ctrl_ops,
++					     V4L2_CID_EXPOSURE,
++					     IMX520_EXPOSURE_MIN,
++					     lpfr - IMX520_EXPOSURE_OFFSET,
++					     IMX520_EXPOSURE_STEP,
++					     IMX520_EXPOSURE_DEFAULT);
++
++	imx520->again_ctrl = v4l2_ctrl_new_std(ctrl_hdlr,
++					       &imx520_ctrl_ops,
++					       V4L2_CID_ANALOGUE_GAIN,
++					       IMX520_AGAIN_MIN,
++					       IMX520_AGAIN_MAX,
++					       IMX520_AGAIN_STEP,
++					       IMX520_AGAIN_DEFAULT);
++
++	v4l2_ctrl_cluster(2, &imx520->exp_ctrl);
++
++	imx520->vblank_ctrl = v4l2_ctrl_new_std(ctrl_hdlr,
++						&imx520_ctrl_ops,
++						V4L2_CID_VBLANK,
++						mode->vblank_min,
++						mode->vblank_max,
++						1, mode->vblank);
++
++	/* Read only controls */
++	imx520->pclk_ctrl = v4l2_ctrl_new_std(ctrl_hdlr,
++					      &imx520_ctrl_ops,
++					      V4L2_CID_PIXEL_RATE,
++					      mode->pclk, mode->pclk,
++					      1, mode->pclk);
++
++	imx520->link_freq_ctrl = v4l2_ctrl_new_int_menu(ctrl_hdlr,
++							&imx520_ctrl_ops,
++							V4L2_CID_LINK_FREQ,
++							ARRAY_SIZE(link_freq) -
++							1,
++							mode->link_freq_idx,
++							link_freq);
++	if (imx520->link_freq_ctrl)
++		imx520->link_freq_ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	imx520->hblank_ctrl = v4l2_ctrl_new_std(ctrl_hdlr,
++						&imx520_ctrl_ops,
++						V4L2_CID_HBLANK,
++						IMX520_REG_MIN,
++						IMX520_REG_MAX,
++						1, mode->hblank);
++	if (imx520->hblank_ctrl)
++		imx520->hblank_ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	ret = v4l2_fwnode_device_parse(imx520->dev, &props);
++	if (ret)
++		goto error_free_hdlr;
++
++	ret = v4l2_ctrl_new_fwnode_properties(ctrl_hdlr, &imx520_ctrl_ops,
++					      &props);
++	if (ret)
++		goto error_free_hdlr;
++
++	if (ctrl_hdlr->error) {
++		ret = ctrl_hdlr->error;
++		dev_err(imx520->dev, "control init failed: %d\n",
++			ret);
++		goto error_free_hdlr;
++	}
++
++	imx520->sd.ctrl_handler = ctrl_hdlr;
++
++	return 0;
++
++error_free_hdlr:
++	v4l2_ctrl_handler_free(ctrl_hdlr);
++
++	return ret;
++}
++
++/**
++ * imx520_probe() - I2C client device binding
++ * @client: pointer to i2c client device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx520_probe(struct i2c_client *client)
++{
++	struct imx520 *imx520;
++	const char *name;
++	int ret;
++
++	imx520 = devm_kzalloc(&client->dev, sizeof(*imx520), GFP_KERNEL);
++	if (!imx520)
++		return -ENOMEM;
++
++	imx520->dev = &client->dev;
++	name = device_get_match_data(&client->dev);
++	if (!name)
++		return -ENODEV;
++
++	/* Initialize subdev */
++	v4l2_i2c_subdev_init(&imx520->sd, client, &imx520_subdev_ops);
++	imx520->sd.internal_ops = &imx520_internal_ops;
++
++	ret = imx520_parse_hw_config(imx520);
++	if (ret) {
++		dev_err(imx520->dev, "HW configuration is not supported\n");
++		return ret;
++	}
++
++	mutex_init(&imx520->mutex);
++
++	ret = imx520_power_on(imx520->dev);
++	if (ret) {
++		dev_err(imx520->dev, "failed to power-on the sensor\n");
++		goto error_mutex_destroy;
++	}
++
++	/* Check module identity */
++	ret = imx520_detect(imx520);
++	if (ret) {
++		dev_err(imx520->dev, "failed to find sensor: %d\n", ret);
++		goto error_power_off;
++	}
++
++	/* Set default mode to max resolution */
++	imx520->cur_mode = &supported_mode;
++	imx520->vblank = imx520->cur_mode->vblank;
++
++	ret = imx520_init_controls(imx520);
++	if (ret) {
++		dev_err(imx520->dev, "failed to init controls: %d\n", ret);
++		goto error_power_off;
++	}
++
++	/* Initialize subdev */
++	imx520->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++	imx520->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
++
++	v4l2_i2c_subdev_set_name(&imx520->sd, client, name, NULL);
++
++	/* Initialize source pad */
++	imx520->pad.flags = MEDIA_PAD_FL_SOURCE;
++	ret = media_entity_pads_init(&imx520->sd.entity, 1, &imx520->pad);
++	if (ret) {
++		dev_err(imx520->dev, "failed to init entity pads: %d\n", ret);
++		goto error_handler_free;
++	}
++
++	ret = v4l2_async_register_subdev_sensor(&imx520->sd);
++	if (ret < 0) {
++		dev_err(imx520->dev,
++			"failed to register async subdev: %d\n", ret);
++		goto error_media_entity;
++	}
++
++	pm_runtime_set_active(imx520->dev);
++	pm_runtime_enable(imx520->dev);
++	pm_runtime_idle(imx520->dev);
++
++	return 0;
++
++error_media_entity:
++	media_entity_cleanup(&imx520->sd.entity);
++error_handler_free:
++	v4l2_ctrl_handler_free(imx520->sd.ctrl_handler);
++error_power_off:
++	imx520_power_off(imx520->dev);
++error_mutex_destroy:
++	mutex_destroy(&imx520->mutex);
++
++	return ret;
++}
++
++/**
++ * imx520_remove() - I2C client device unbinding
++ * @client: pointer to I2C client device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static void imx520_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct imx520 *imx520 = to_imx520(sd);
++
++	v4l2_async_unregister_subdev(sd);
++	media_entity_cleanup(&sd->entity);
++	v4l2_ctrl_handler_free(sd->ctrl_handler);
++
++	pm_runtime_disable(&client->dev);
++	if (!pm_runtime_status_suspended(&client->dev))
++		imx520_power_off(&client->dev);
++	pm_runtime_set_suspended(&client->dev);
++
++	mutex_destroy(&imx520->mutex);
++}
++
++static const struct dev_pm_ops imx520_pm_ops = {
++	SET_RUNTIME_PM_OPS(imx520_power_off, imx520_power_on, NULL)
++};
++
++static const struct of_device_id imx520_of_match[] = {
++	{ .compatible = "sony,imx520", .data = "imx520" },
++	{ }
++};
++
++MODULE_DEVICE_TABLE(of, imx520_of_match);
++
++static struct i2c_driver imx520_driver = {
++	.probe = imx520_probe,
++	.remove = imx520_remove,
++	.driver = {
++		.name = "imx520",
++		.pm = &imx520_pm_ops,
++		.of_match_table = imx520_of_match,
++	},
++};
++
++module_i2c_driver(imx520_driver);
++
++MODULE_DESCRIPTION("Sony IMX520 sensor driver");
++MODULE_LICENSE("GPL");

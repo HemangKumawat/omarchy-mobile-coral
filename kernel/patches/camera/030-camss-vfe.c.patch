@@ -1,0 +1,42 @@
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe.c b/drivers/media/platform/qcom/camss/camss-vfe.c
+index 4bca6c3abaff..a80754baaa57 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe.c
+@@ -347,6 +347,7 @@ static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
+ 	case CAMSS_845:
+ 	case CAMSS_8550:
+ 	case CAMSS_X1E80100:
++	case CAMSS_8150:
+ 		switch (sink_code) {
+ 		case MEDIA_BUS_FMT_YUYV8_1X16:
+ 		{
+@@ -936,6 +937,21 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
+ 	for (i = 0; i < vfe->nclocks; i++) {
+ 		struct camss_clock *clock = &vfe->clock[i];
+ 
++		/* Stock SM8150 CPAS floors active CAMNOC BW at 3 GB/s.
++		 * Its 32-byte bus needs 93.75 MHz; the next OPP is 150 MHz.
++		 */
++		if (vfe->camss->res->version == CAMSS_8150 &&
++		    !strcmp(clock->name, "camnoc_axi")) {
++			if (clk_get_rate(clock->clk) >= 150000000)
++				continue;
++			ret = clk_set_rate(clock->clk, 150000000);
++			if (ret) {
++				dev_err(dev, "CAMNOC clk set rate failed: %d\n", ret);
++				return ret;
++			}
++			continue;
++		}
++
+ 		if (vfe_match_clock_names(vfe, clock)) {
+ 			u64 min_rate = 0;
+ 			long rate;
+@@ -1973,6 +1989,7 @@ static int vfe_bpl_align(struct vfe_device *vfe)
+ 	case CAMSS_8250:
+ 	case CAMSS_8280XP:
+ 	case CAMSS_845:
++	case CAMSS_8150:
+ 	case CAMSS_8550:
+ 	case CAMSS_X1E80100:
+ 		ret = 16;

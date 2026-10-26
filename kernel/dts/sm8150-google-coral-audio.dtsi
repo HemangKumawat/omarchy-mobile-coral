@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// GPIOs/addresses from Coral TP1A stock DT; firmware stays on the phone.
+#include <dt-bindings/sound/qcom,q6asm.h>
+
+/ {
+	aliases {
+		spi0 = &spi4;
+		spi11 = &spi11;
+	};
+};
+
+&vreg_l9a_1p2 {
+	/* The Rust-owned SPI device cannot make a kernel regulator vote. */
+	regulator-boot-on;
+	regulator-always-on;
+};
+
+&spi11 {
+	status = "okay";
+	ia8508: dsp@0 {
+		compatible = "knowles,iaxxx-spi";
+		reg = <0>;
+		spi-max-frequency = <9600000>;
+		spi-cpha;
+		vdd-core-supply = <&vreg_l9a_1p2>;
+		reset-gpios = <&tlmm 143 GPIO_ACTIVE_HIGH>;
+		event-gpios = <&tlmm 123 GPIO_ACTIVE_HIGH>;
+		power-valid-gpios = <&tlmm 151 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&i2c15 {
+	bottom_amp: amplifier@40 {
+		compatible = "cirrus,cs35l36";
+		reg = <0x40>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Bottom";
+		reset-gpios = <&tlmm 148 GPIO_ACTIVE_HIGH>;
+		interrupts-extended = <&tlmm 132 IRQ_TYPE_LEVEL_LOW>;
+		VA-supply = <&vreg_s4a_1p8>;
+		VP-supply = <&vph_pwr>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-ctl-millivolt = <4500>;
+		cirrus,boost-peak-milliamp = <1600>;
+		cirrus,boost-ctl-select = <1>;
+		cirrus,multi-amp-mode;
+		cirrus,temp-warn-threshold = <1>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&bottom_amp_irq>;
+	};
+	top_amp: amplifier@41 {
+		compatible = "cirrus,cs35l36";
+		reg = <0x41>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Top";
+		reset-gpios = <&tlmm 35 GPIO_ACTIVE_HIGH>;
+		interrupts-extended = <&tlmm 36 IRQ_TYPE_LEVEL_LOW>;
+		VA-supply = <&vreg_s4a_1p8>;
+		VP-supply = <&vph_pwr>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-ctl-millivolt = <4500>;
+		cirrus,boost-peak-milliamp = <1600>;
+		cirrus,boost-ctl-select = <1>;
+		cirrus,multi-amp-mode;
+		cirrus,temp-warn-threshold = <1>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&top_amp_irq>;
+	};
+};
+
+&tlmm {
+	bottom_amp_irq: bottom-amp-irq-state {
+		pins = "gpio132";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+		input-enable;
+	};
+	top_amp_irq: top-amp-irq-state {
+		pins = "gpio36";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+		input-enable;
+	};
+	coral_tert_tdm: coral-tert-tdm-state {
+		pins = "gpio131", "gpio133", "gpio134";
+		function = "ter_mi2s";
+		drive-strength = <8>;
+		bias-disable;
+	};
+	coral_quat_tdm: coral-quat-tdm-state {
+		pins = "gpio137", "gpio138", "gpio139";
+		function = "qua_mi2s";
+		drive-strength = <6>;
+		bias-disable;
+	};
+};
+
+&q6afedai {
+	dai@38 {
+		reg = <TERTIARY_TDM_RX_0>;
+		qcom,tdm-sync-mode = <0>;
+		qcom,tdm-sync-src = <1>;
+		qcom,tdm-data-out = <0>;
+		qcom,tdm-invert-sync = <0>;
+		qcom,tdm-data-delay = <1>;
+		qcom,tdm-data-align = <0>;
+	};
+	dai@49 {
+		reg = <QUATERNARY_TDM_TX_0>;
+		qcom,tdm-sync-mode = <0>;
+		qcom,tdm-sync-src = <1>;
+		qcom,tdm-data-out = <0>;
+		qcom,tdm-invert-sync = <0>;
+		qcom,tdm-data-delay = <1>;
+		qcom,tdm-data-align = <0>;
+	};
+};
+
+&q6asmdai {
+	dai@0 { reg = <0>; };
+	dai@1 { reg = <1>; };
+};
+
+&sound {
+	compatible = "qcom,sm8150-sndcard";
+	model = "Pixel4XL";
+	clocks = <&rpmhcc RPMH_LN_BB_CLK3>;
+	clock-names = "iaxxx";
+	widgets = "Speaker", "Bottom Speaker", "Speaker", "Top Speaker";
+	pin-switches = "Bottom Speaker", "Top Speaker";
+	audio-routing = "Bottom Speaker", "Bottom SPK", "Top Speaker", "Top SPK";
+	pinctrl-names = "default";
+	pinctrl-0 = <&coral_tert_tdm &coral_quat_tdm>;
+	mm1-dai-link {
+		link-name = "MultiMedia1";
+		cpu { sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>; };
+	};
+	mm2-dai-link {
+		link-name = "MultiMedia2";
+		cpu { sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>; };
+	};
+	speaker-dai-link {
+		link-name = "Coral Speakers";
+		cpu { sound-dai = <&q6afedai TERTIARY_TDM_RX_0>; };
+		platform { sound-dai = <&q6routing>; };
+		codec { sound-dai = <&top_amp>, <&bottom_amp>; };
+	};
+	mic-dai-link {
+		link-name = "Coral Microphones";
+		cpu { sound-dai = <&q6afedai QUATERNARY_TDM_TX_0>; };
+		platform { sound-dai = <&q6routing>; };
+		/* Rust owns IA8508; the machine driver supplies the dummy codec. */
+	};
+};

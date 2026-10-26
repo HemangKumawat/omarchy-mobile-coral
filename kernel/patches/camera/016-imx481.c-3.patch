@@ -1,0 +1,373 @@
+--- a/drivers/media/i2c/imx481.c
++++ b/drivers/media/i2c/imx481.c
+@@ -798,3 +798,370 @@
+ 			goto done_endpoint_free;
+ 
+ 	ret = -EINVAL;
++
++done_endpoint_free:
++	v4l2_fwnode_endpoint_free(&bus_cfg);
++
++	return ret;
++}
++
++/* V4l2 subdevice ops */
++static const struct v4l2_subdev_video_ops imx481_video_ops = {
++	.s_stream = imx481_set_stream,
++};
++
++static const struct v4l2_subdev_pad_ops imx481_pad_ops = {
++	.enum_mbus_code = imx481_enum_mbus_code,
++	.enum_frame_size = imx481_enum_frame_size,
++	.get_fmt = imx481_get_pad_format,
++	.set_fmt = imx481_set_pad_format,
++	.get_selection = imx481_get_selection,
++};
++
++static const struct v4l2_subdev_ops imx481_subdev_ops = {
++	.video = &imx481_video_ops,
++	.pad = &imx481_pad_ops,
++};
++
++static const struct v4l2_subdev_internal_ops imx481_internal_ops = {
++	.init_state = imx481_init_state,
++};
++
++/**
++ * imx481_power_on() - Sensor power on sequence
++ * @dev: pointer to i2c device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_power_on(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx481 *imx481 = to_imx481(sd);
++	int ret;
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(imx481->auxiliary), imx481->auxiliary);
++	if (ret)
++		return ret;
++
++	ret = regulator_set_voltage(imx481->vana, IMX481_VANA_MIN_UV,
++				    IMX481_VANA_MAX_UV);
++	if (ret)
++		goto error_auxiliary;
++
++	ret = regulator_enable(imx481->vana);
++	if (ret)
++		goto error_vana_voltage;
++
++	gpiod_set_value_cansleep(imx481->vana_enable_gpio, 1);
++	usleep_range(1000, 2000);
++
++	ret = regulator_set_load(imx481->vdig, IMX481_VDIG_LOAD_UA);
++	if (ret)
++		goto error_vana;
++
++	ret = regulator_enable(imx481->vdig);
++	if (ret)
++		goto error_vdig_load;
++	usleep_range(1000, 2000);
++
++	ret = regulator_enable(imx481->vio);
++	if (ret)
++		goto error_vdig;
++	usleep_range(1000, 2000);
++
++	ret = clk_prepare_enable(imx481->inclk);
++	if (ret) {
++		dev_err(imx481->dev, "failed to enable input clock\n");
++		goto error_vio;
++	}
++
++	usleep_range(1000, 1200);
++	gpiod_set_value_cansleep(imx481->reset_gpio, 0);
++	usleep_range(1000, 2000);
++
++	return 0;
++
++error_vio:
++	regulator_disable(imx481->vio);
++error_vdig:
++	regulator_disable(imx481->vdig);
++error_vdig_load:
++	regulator_set_load(imx481->vdig, 0);
++error_vana:
++	gpiod_set_value_cansleep(imx481->vana_enable_gpio, 0);
++	regulator_disable(imx481->vana);
++error_vana_voltage:
++	regulator_set_voltage(imx481->vana, 0, IMX481_VANA_MAX_UV);
++error_auxiliary:
++	regulator_bulk_disable(ARRAY_SIZE(imx481->auxiliary), imx481->auxiliary);
++
++	return ret;
++}
++
++/**
++ * imx481_power_off() - Sensor power off sequence
++ * @dev: pointer to i2c device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_power_off(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx481 *imx481 = to_imx481(sd);
++
++	gpiod_set_value_cansleep(imx481->reset_gpio, 1);
++	clk_disable_unprepare(imx481->inclk);
++	regulator_disable(imx481->vio);
++	regulator_disable(imx481->vdig);
++	regulator_set_load(imx481->vdig, 0);
++	gpiod_set_value_cansleep(imx481->vana_enable_gpio, 0);
++	regulator_disable(imx481->vana);
++	regulator_set_voltage(imx481->vana, 0, IMX481_VANA_MAX_UV);
++	regulator_bulk_disable(ARRAY_SIZE(imx481->auxiliary), imx481->auxiliary);
++
++	return 0;
++}
++
++/**
++ * imx481_init_controls() - Initialize sensor subdevice controls
++ * @imx481: pointer to imx481 device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_init_controls(struct imx481 *imx481)
++{
++	struct v4l2_ctrl_handler *ctrl_hdlr = &imx481->ctrl_handler;
++	const struct imx481_mode *mode = imx481->cur_mode;
++	struct v4l2_fwnode_device_properties props;
++	u32 lpfr;
++	int ret;
++
++	ret = v4l2_ctrl_handler_init(ctrl_hdlr, 8);
++	if (ret)
++		return ret;
++
++	/* Serialize controls with sensor device */
++	ctrl_hdlr->lock = &imx481->mutex;
++
++	/* Initialize exposure and gain */
++	lpfr = mode->vblank + mode->height;
++	imx481->exp_ctrl = v4l2_ctrl_new_std(ctrl_hdlr,
++					     &imx481_ctrl_ops,
++					     V4L2_CID_EXPOSURE,
++					     IMX481_EXPOSURE_MIN,
++					     lpfr - IMX481_EXPOSURE_OFFSET,
++					     IMX481_EXPOSURE_STEP,
++					     IMX481_EXPOSURE_DEFAULT);
++
++	imx481->again_ctrl = v4l2_ctrl_new_std(ctrl_hdlr,
++					       &imx481_ctrl_ops,
++					       V4L2_CID_ANALOGUE_GAIN,
++					       IMX481_AGAIN_MIN,
++					       IMX481_AGAIN_MAX,
++					       IMX481_AGAIN_STEP,
++					       IMX481_AGAIN_DEFAULT);
++
++	v4l2_ctrl_cluster(2, &imx481->exp_ctrl);
++
++	imx481->vblank_ctrl = v4l2_ctrl_new_std(ctrl_hdlr,
++						&imx481_ctrl_ops,
++						V4L2_CID_VBLANK,
++						mode->vblank_min,
++						mode->vblank_max,
++						1, mode->vblank);
++
++	/* Read only controls */
++	imx481->pclk_ctrl = v4l2_ctrl_new_std(ctrl_hdlr,
++					      &imx481_ctrl_ops,
++					      V4L2_CID_PIXEL_RATE,
++					      mode->pclk, mode->pclk,
++					      1, mode->pclk);
++
++	imx481->link_freq_ctrl = v4l2_ctrl_new_int_menu(ctrl_hdlr,
++							&imx481_ctrl_ops,
++							V4L2_CID_LINK_FREQ,
++							ARRAY_SIZE(link_freq) -
++							1,
++							mode->link_freq_idx,
++							link_freq);
++	if (imx481->link_freq_ctrl)
++		imx481->link_freq_ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	imx481->hblank_ctrl = v4l2_ctrl_new_std(ctrl_hdlr,
++						&imx481_ctrl_ops,
++						V4L2_CID_HBLANK,
++						IMX481_REG_MIN,
++						IMX481_REG_MAX,
++						1, mode->hblank);
++	if (imx481->hblank_ctrl)
++		imx481->hblank_ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	ret = v4l2_fwnode_device_parse(imx481->dev, &props);
++	if (ret)
++		goto error_free_hdlr;
++
++	ret = v4l2_ctrl_new_fwnode_properties(ctrl_hdlr, &imx481_ctrl_ops,
++					      &props);
++	if (ret)
++		goto error_free_hdlr;
++
++	if (ctrl_hdlr->error) {
++		ret = ctrl_hdlr->error;
++		dev_err(imx481->dev, "control init failed: %d\n",
++			ret);
++		goto error_free_hdlr;
++	}
++
++	imx481->sd.ctrl_handler = ctrl_hdlr;
++
++	return 0;
++
++error_free_hdlr:
++	v4l2_ctrl_handler_free(ctrl_hdlr);
++
++	return ret;
++}
++
++/**
++ * imx481_probe() - I2C client device binding
++ * @client: pointer to i2c client device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static int imx481_probe(struct i2c_client *client)
++{
++	struct imx481 *imx481;
++	const char *name;
++	int ret;
++
++	imx481 = devm_kzalloc(&client->dev, sizeof(*imx481), GFP_KERNEL);
++	if (!imx481)
++		return -ENOMEM;
++
++	imx481->dev = &client->dev;
++	name = device_get_match_data(&client->dev);
++	if (!name)
++		return -ENODEV;
++
++	/* Initialize subdev */
++	v4l2_i2c_subdev_init(&imx481->sd, client, &imx481_subdev_ops);
++	imx481->sd.internal_ops = &imx481_internal_ops;
++
++	ret = imx481_parse_hw_config(imx481);
++	if (ret) {
++		dev_err(imx481->dev, "HW configuration is not supported\n");
++		return ret;
++	}
++
++	mutex_init(&imx481->mutex);
++
++	ret = imx481_power_on(imx481->dev);
++	if (ret) {
++		dev_err(imx481->dev, "failed to power-on the sensor\n");
++		goto error_mutex_destroy;
++	}
++
++	/* Check module identity */
++	ret = imx481_detect(imx481);
++	if (ret) {
++		dev_err(imx481->dev, "failed to find sensor: %d\n", ret);
++		goto error_power_off;
++	}
++
++	/* Set default mode to max resolution */
++	imx481->cur_mode = &supported_mode;
++	imx481->vblank = imx481->cur_mode->vblank;
++
++	ret = imx481_init_controls(imx481);
++	if (ret) {
++		dev_err(imx481->dev, "failed to init controls: %d\n", ret);
++		goto error_power_off;
++	}
++
++	/* Initialize subdev */
++	imx481->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++	imx481->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
++
++	v4l2_i2c_subdev_set_name(&imx481->sd, client, name, NULL);
++
++	/* Initialize source pad */
++	imx481->pad.flags = MEDIA_PAD_FL_SOURCE;
++	ret = media_entity_pads_init(&imx481->sd.entity, 1, &imx481->pad);
++	if (ret) {
++		dev_err(imx481->dev, "failed to init entity pads: %d\n", ret);
++		goto error_handler_free;
++	}
++
++	ret = v4l2_async_register_subdev_sensor(&imx481->sd);
++	if (ret < 0) {
++		dev_err(imx481->dev,
++			"failed to register async subdev: %d\n", ret);
++		goto error_media_entity;
++	}
++
++	pm_runtime_set_active(imx481->dev);
++	pm_runtime_enable(imx481->dev);
++	pm_runtime_idle(imx481->dev);
++
++	return 0;
++
++error_media_entity:
++	media_entity_cleanup(&imx481->sd.entity);
++error_handler_free:
++	v4l2_ctrl_handler_free(imx481->sd.ctrl_handler);
++error_power_off:
++	imx481_power_off(imx481->dev);
++error_mutex_destroy:
++	mutex_destroy(&imx481->mutex);
++
++	return ret;
++}
++
++/**
++ * imx481_remove() - I2C client device unbinding
++ * @client: pointer to I2C client device
++ *
++ * Return: 0 if successful, error code otherwise.
++ */
++static void imx481_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct imx481 *imx481 = to_imx481(sd);
++
++	v4l2_async_unregister_subdev(sd);
++	media_entity_cleanup(&sd->entity);
++	v4l2_ctrl_handler_free(sd->ctrl_handler);
++
++	pm_runtime_disable(&client->dev);
++	if (!pm_runtime_status_suspended(&client->dev))
++		imx481_power_off(&client->dev);
++	pm_runtime_set_suspended(&client->dev);
++
++	mutex_destroy(&imx481->mutex);
++}
++
++static const struct dev_pm_ops imx481_pm_ops = {
++	SET_RUNTIME_PM_OPS(imx481_power_off, imx481_power_on, NULL)
++};
++
++static const struct of_device_id imx481_of_match[] = {
++	{ .compatible = "sony,imx481", .data = "imx481" },
++	{ }
++};
++
++MODULE_DEVICE_TABLE(of, imx481_of_match);
++
++static struct i2c_driver imx481_driver = {
++	.probe = imx481_probe,
++	.remove = imx481_remove,
++	.driver = {
++		.name = "imx481",
++		.pm = &imx481_pm_ops,
++		.of_match_table = imx481_of_match,
++	},
++};
++
++module_i2c_driver(imx481_driver);
++
++MODULE_DESCRIPTION("Sony IMX481 sensor driver");
++MODULE_LICENSE("GPL");

@@ -1,0 +1,11 @@
+--- a/drivers/media/platform/qcom/camss/camss-csid.c
++++ b/drivers/media/platform/qcom/camss/camss-csid.c
+@@ -1288,6 +1288,8 @@
+ 
+ 		lane_cfg = &csiphy->cfg.csi2->lane_cfg;
+ 		csid->phy.lane_cnt = lane_cfg->num_data;
++		csid->phy.is_cphy =
++			lane_cfg->bus_type == V4L2_MBUS_CSI2_CPHY;
+ 		csid->phy.lane_assign = csid_get_lane_assign(lane_cfg);
+ 	}
+ 	/* Decide which virtual channels to enable based on which source pads are enabled */

@@ -1,0 +1,10 @@
+--- a/drivers/media/platform/qcom/camss/camss-csid.h
++++ b/drivers/media/platform/qcom/camss/camss-csid.h
+@@ -67,6 +67,7 @@
+ struct csid_phy_config {
+ 	u8 csiphy_id;
+ 	u8 lane_cnt;
++	bool is_cphy;
+ 	u32 lane_assign;
+ 	u32 en_vc;
+ 	u8 need_vc_update;

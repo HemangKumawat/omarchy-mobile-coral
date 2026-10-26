@@ -1,0 +1,132 @@
+diff --git a/drivers/input/touchscreen/fts_touch/fts.c b/drivers/input/touchscreen/fts_touch/fts.c
+index 6a9e29b01..92010d2f3 100644
+--- a/drivers/input/touchscreen/fts_touch/fts.c
++++ b/drivers/input/touchscreen/fts_touch/fts.c
+@@ -2721,13 +2721,10 @@ static DEVICE_ATTR_RW(default_mf);
+ 
+ /*  /sys/devices/soc.0/f9928000.i2c/i2c-6/6-0049 */
+ static struct attribute *fts_attr_group[] = {
+-	 &dev_attr_infoblock_getdata.attr,
+-	&dev_attr_fwupdate.attr,
+ 	&dev_attr_appid.attr,
+ 	&dev_attr_mode_active.attr,
+ 	&dev_attr_fw_file_test.attr,
+ 	&dev_attr_status.attr,
+-	&dev_attr_stm_fts_cmd.attr,
+ #ifdef CONFIG_TOUCHSCREEN_HEATMAP
+ 	&dev_attr_heatmap_mode.attr,
+ #endif
+@@ -2757,7 +2754,6 @@ static struct attribute *fts_attr_group[] = {
+ 	&dev_attr_gesture_mask.attr,
+ 	&dev_attr_gesture_coordinates.attr,
+ #endif
+-	&dev_attr_autotune.attr,
+ 	&dev_attr_touchsim.attr,
+ 	&dev_attr_default_mf.attr,
+ 	NULL,
+@@ -4183,6 +4179,17 @@ static int fts_fw_update(struct fts_ts_info *info)
+ 	// 	goto out;
+ 	// }
+ 
++	/* No CRC recovery, CX write or calibration when firmware is read-only.
++	 * A reset timeout can leave zeroed metadata; never infer permission to
++	 * initialize flash from those values. Sensing only uses volatile state.
++	 */
++	if (!info->board->auto_fw_update) {
++		pr_info("coral fts flash-write guard: cfgAfeVer=%02X cxAfeVer=%02X mpFlag=%02X; sensing only\n",
++			systemInfo.u8_cfgAfeVer, systemInfo.u8_cxAfeVer,
++			systemInfo.u8_mpFlag);
++		return fts_init_sensing(info);
++	}
++
+ 	pr_info("Fw Auto Update is starting...\n");
+ 
+ 	/* Check CRC status */
+@@ -4346,6 +4353,11 @@ static int fts_chip_initialization(struct fts_ts_info *info, int init_type)
+ 	int initretrycnt = 0;
+ 	const char *limits_file = info->board->limits_name;
+ 
++	if (!info->board->auto_fw_update) {
++		pr_err("coral fts: calibration flash writes forbidden\n");
++		return ERROR_OP_NOT_ALLOW;
++	}
++
+ 	/* initialization error, retry initialization */
+ 	for (retry = 0; retry < RETRY_INIT_BOOT; retry++) {
+ #ifndef COMPUTE_INIT_METHOD
+@@ -5638,9 +5650,7 @@ static int fts_probe(struct spi_device *client)
+ 		goto ProbeErrorExit_7;
+ 	}
+ 
+-	error = fts_proc_init();
+-	if (error < OK)
+-		pr_err("Error: can not create /proc file!\n");
++	/* Raw maintenance commands must never be exposed on coral. */
+ 
+ 	if (info->fwu_workqueue)
+ 		queue_delayed_work(info->fwu_workqueue, &info->fwu_work,
+@@ -5727,7 +5737,7 @@ static void fts_remove(struct spi_device *client)
+ 	tbn_cleanup(info->tbn);
+ #endif
+ 
+-	fts_proc_remove();
++	/* No /proc/fts was registered. */
+ 
+ 	/* sysfs stuff */
+ 	sysfs_remove_group(&client->dev.kobj, &info->attrs);
+diff --git a/drivers/input/touchscreen/fts_touch/fts_lib/ftsCore.c b/drivers/input/touchscreen/fts_touch/fts_lib/ftsCore.c
+index 513cc2006..ccad7271e 100644
+--- a/drivers/input/touchscreen/fts_touch/fts_lib/ftsCore.c
++++ b/drivers/input/touchscreen/fts_touch/fts_lib/ftsCore.c
+@@ -468,6 +468,18 @@ int writeSysCmd(u8 sys_cmd, u8 *sett, int size)
+ 	int buff_len = (2 + 1) * size + 1;
+ 	int index = 0;
+ 
++	/* This kernel never persists configuration or calibration to the IC. */
++	if (size < 0 || (size && !sett))
++		return ERROR_OP_NOT_ALLOW;
++	if (sys_cmd == SYS_CMD_SAVE_FLASH ||
++	    (sys_cmd == SYS_CMD_SPECIAL && size > 0 &&
++	     (sett[0] == SPECIAL_PANEL_INIT ||
++	      sett[0] == SPECIAL_FULL_PANEL_INIT ||
++	      sett[0] == SPECIAL_WRITE_HOST_MEM_TO_FLASH))) {
++		pr_err("coral fts: persistent system command forbidden\n");
++		return ERROR_OP_NOT_ALLOW;
++	}
++
+ 	cmd = kmalloc(cmd_len * sizeof(u8), GFP_KERNEL);
+ 	buff = kmalloc(buff_len * sizeof(char), GFP_KERNEL);
+ 
+diff --git a/drivers/input/touchscreen/fts_touch/fts_lib/ftsFlash.c b/drivers/input/touchscreen/fts_touch/fts_lib/ftsFlash.c
+index 7902bd9cb..ed78fff8c 100644
+--- a/drivers/input/touchscreen/fts_touch/fts_lib/ftsFlash.c
++++ b/drivers/input/touchscreen/fts_touch/fts_lib/ftsFlash.c
+@@ -528,26 +528,8 @@ int flash_enable_uvlo_autopowerdown(void)
+   */
+ int flash_unlock(void)
+ {
+-	u8 cmd[6] = { FTS_CMD_HW_REG_W,	  0x20,	  0x00,	  0x00,
+-		      FLASH_UNLOCK_CODE0, FLASH_UNLOCK_CODE1 };
+-
+-	u8 cmd1[6] = { FTS_CMD_HW_REG_W, 0x20, 0x00, 0x00,
+-		       FLASH_UNLOCK_CODE2, FLASH_UNLOCK_CODE3 };
+-
+-	pr_info("Command unlock ...\n");
+-	if (fts_write(cmd, ARRAY_SIZE(cmd)) < OK) {
+-		pr_err("flash_unlock: ERROR %08X\n", ERROR_BUS_W);
+-		return ERROR_BUS_W;
+-	}
+-
+-	if (fts_write(cmd1, ARRAY_SIZE(cmd1)) < OK) {
+-		pr_err("Command unlock: ERROR %08X\n", ERROR_BUS_W);
+-		return ERROR_BUS_W;
+-	}
+-
+-	pr_info("Unlock flash DONE!\n");
+-
+-	return OK;
++	pr_err("coral fts: flash unlock forbidden\n");
++	return ERROR_OP_NOT_ALLOW;
+ }
+ 
+ /**

@@ -1,0 +1,51 @@
+--- a/arch/arm64/boot/dts/qcom/sm8150-google-coral-cameras.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral-cameras.dtsi
+@@ -10,7 +10,8 @@
+ &max77826_ldo1 { regulator-min-microvolt = <1100000>; regulator-max-microvolt = <1100000>; };
+ &max77826_ldo3 { regulator-min-microvolt = <1050000>; regulator-max-microvolt = <1050000>; };
+ &max77826_ldo5 { regulator-min-microvolt = <1800000>; regulator-max-microvolt = <1800000>; };
+-&max77826_ldo6 { regulator-min-microvolt = <2800000>; regulator-max-microvolt = <2800000>; };
++/* Each rear driver votes 2.8V only while powered; PVT Silego votes 3.2V. */
++&max77826_ldo6 { regulator-min-microvolt = <2800000>; regulator-max-microvolt = <3200000>; };
+ &max77826_ldo7 { regulator-min-microvolt = <2900000>; regulator-max-microvolt = <2900000>; };
+ &max77826_ldo10 { regulator-min-microvolt = <2800000>; regulator-max-microvolt = <2800000>; };
+ &max77826_ldo11 { regulator-min-microvolt = <1800000>; regulator-max-microvolt = <1800000>; };
+@@ -275,3 +276,38 @@
+ 		};
+ 	};
+ };
++
++/* Power/identity/OFF only. No LED interface, strobe GPIO or brightness writes. */
++&tlmm {
++	coral_ir_fault: coral-ir-fault-state {
++		pins = "gpio124";
++		function = "gpio";
++		bias-pull-up;
++		input-enable;
++	};
++};
++&cci0_i2c0 {
++	coral_silego: safety@8 {
++		compatible = "google,coral-silego-read-only";
++		reg = <0x08>;
++	};
++	coral_ir_off_probe: led-controller@64 {
++		compatible = "google,coral-lm36011-off-probe";
++		reg = <0x64>;
++		buck1-supply = <&max77826_buck>;
++		buck2-supply = <&max77826_buckboost>;
++		vio-supply = <&max77826_ldo11>;
++		silego-supply = <&max77826_ldo6>;
++		google,peer-emitter = <&coral_ir_dot_inhibited>;
++		google,safety-controller = <&coral_silego>;
++		fault-gpios = <&tlmm 124 GPIO_ACTIVE_LOW>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&coral_ir_fault>;
++	};
++};
++&cci0_i2c1 {
++	coral_ir_dot_inhibited: led-controller@64 {
++		compatible = "google,coral-lm36011-inhibited";
++		reg = <0x64>;
++	};
++};

@@ -1,0 +1,206 @@
+--- a/hexagonrpcd/listener.c
++++ b/hexagonrpcd/listener.c
+@@ -434,7 +434,9 @@
+ 	uint32_t outbufs_len;
+ 	int ret;
+ 
+-	outbufs_len = outbufs_calculate_size(REMOTE_SCALARS_OUTBUFS(*sc), returned);
++	/* A failed callback has no valid output, matching stock listener2. */
++	outbufs_len = result ? 0 :
++		outbufs_calculate_size(REMOTE_SCALARS_OUTBUFS(*sc), returned);
+ 
+ 	if (outbufs_len) {
+ 		outbufs = malloc(outbufs_len);
+@@ -532,6 +534,9 @@
+ 	uint32_t method = REMOTE_SCALARS_METHOD(sc);
+ 	int ret;
+ 
++	/* Rejected calls return an AEE error through the next next2 reply. */
++	*returned = NULL;
++
+ 	if (method < 31) {
+ 		method = REMOTE_SCALARS_METHOD(sc);
+ 	} else if (REMOTE_SCALARS_INBUFS(sc) != 0
+@@ -540,26 +545,26 @@
+ 	} else {
+ 		fprintf(stderr, "Expected extended method ID, but got none\n");
+ 		*result = AEE_EBADPARM;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	if (sc & 0xff) {
+ 		fprintf(stderr, "Handles are not supported, but got %u in, %u out\n",
+ 				(sc & 0xf0) >> 4, sc & 0xf);
+ 		*result = AEE_EBADPARM;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	if (handle >= n_ifaces) {
+ 		fprintf(stderr, "Unsupported handle: %u\n", handle);
+ 		*result = AEE_EUNSUPPORTED;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	if (method >= ifaces[handle]->n_procs) {
+ 		fprintf(stderr, "Unsupported method: %u (%08x)\n", method, sc);
+ 		*result = AEE_EUNSUPPORTED;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	impl = &ifaces[handle]->procs[method];
+@@ -567,7 +572,7 @@
+ 	if (impl->def == NULL || impl->impl == NULL) {
+ 		fprintf(stderr, "Unsupported method: %u (%08x)\n", method, sc);
+ 		*result = AEE_EUNSUPPORTED;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	ret = count_sizes4(impl->def, REMOTE_SCALARS_INBUFS(sc),
+@@ -575,7 +580,7 @@
+ 	if (ret) {
+ 		fprintf(stderr, "Method invoked with less arguments than expected\n");
+ 		*result = AEE_EBADPARM;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	*returned = alloc_outbufs4(impl->def, decoded,
+@@ -583,7 +588,7 @@
+ 	if (*returned == NULL && impl->def->n_args > 0) {
+ 		perror("Could not allocate output buffers");
+ 		*result = AEE_ENOMEMORY;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	*result = impl->impl(ifaces[handle]->data, decoded, *returned);
+@@ -617,8 +622,10 @@
+ 		if (ret)
+ 			break;
+ 
+-		if (returned != NULL)
++		if (returned != NULL) {
+ 			iobuf_free(n_outbufs, returned);
++			returned = NULL;
++		}
+ 
+ 		ret = invoke_requested_procedure(n_ifaces, ifaces,
+ 						 handle, sc, &result,
+@@ -632,5 +639,7 @@
+ 		n_outbufs = REMOTE_SCALARS_OUTBUFS(sc);
+ 	}
+ 
++	if (returned != NULL)
++		iobuf_free(n_outbufs, returned);
+ 	return ret;
+ }
+--- /dev/null
++++ b/tests/test_listener_rejection.c
+@@ -0,0 +1,102 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later */
++/* Real listener/dispatcher/codec; only the kernel ioctl boundary is substituted. */
++#include <assert.h>
++#include <stdarg.h>
++#include <sys/ioctl.h>
++#include <misc/fastrpc.h>
++#include "../hexagonrpcd/listener.c"
++
++static const struct hrpc_arg_def_interp4 args_def[] = {
++    {HRPC_ARG_WORD, 4}, {HRPC_ARG_OUT_BLOB, 4}
++};
++static const struct hrpc_method_def_interp4 definitions[] = {
++    {.msg_id=0, .n_args=2, .args=args_def},
++    {.msg_id=1, .n_args=2, .args=args_def}
++};
++static uint32_t success(void *data, const struct fastrpc_io_buffer *in,
++                        struct fastrpc_io_buffer *out)
++{
++    (void)data;
++    *(uint32_t *)out[0].p = *(const uint32_t *)in[0].p + 100;
++    return 0;
++}
++static uint32_t callback_error(void *data, const struct fastrpc_io_buffer *in,
++                               struct fastrpc_io_buffer *out)
++{
++    (void)data; (void)in; (void)out;
++    return AEE_EBADPARM; /* No valid output was produced. */
++}
++static const struct fastrpc_function_impl procedures[] = {
++    {&definitions[0], success}, {&definitions[1], callback_error}
++};
++static struct fastrpc_interface iface = {
++    .name="test", .n_procs=2, .procs=procedures
++};
++struct request { uint32_t handle, sc, result; int kind; };
++static const struct request requests[] = {
++    {0, REMOTE_SCALARS_MAKE(0,1,1), 0, 0},
++    {UINT32_MAX, REMOTE_SCALARS_MAKE(19,5,1), AEE_EUNSUPPORTED, 1},
++    {0, REMOTE_SCALARS_MAKE(0,1,1), 0, 0},
++    {0, REMOTE_SCALARS_MAKE(2,1,1), AEE_EUNSUPPORTED, 0},
++    {0, REMOTE_SCALARS_MAKE(1,1,1), AEE_EBADPARM, 0},
++    {0, REMOTE_SCALARS_MAKE(0,1,1), AEE_EBADPARM, 2},
++    {0, REMOTE_SCALARS_MAKE(31,0,1), AEE_EBADPARM, 3},
++    {0, REMOTE_SCALARS_MAKE(0,1,1)|1, AEE_EBADPARM, 0},
++    {0, REMOTE_SCALARS_MAKE(0,1,1), 0, 0}
++};
++static size_t step;
++#ifdef __GLIBC__
++int ioctl(int fd, unsigned long op, ...)
++#else
++int ioctl(int fd, int op, ...)
++#endif
++{
++    (void)fd;
++    assert(op == FASTRPC_IOCTL_INVOKE);
++    va_list ap; va_start(ap, op);
++    struct fastrpc_invoke *invoke = va_arg(ap, struct fastrpc_invoke *);
++    va_end(ap);
++    assert(invoke->handle == ADSP_LISTENER);
++    if (invoke->sc == REMOTE_SCALARS_MAKE(3,0,0)) return 0;
++    assert(invoke->sc == REMOTE_SCALARS_MAKE(4,2,2));
++    struct fastrpc_invoke_args *a = (void *)(uintptr_t)invoke->args;
++    const uint32_t *in = (void *)(uintptr_t)a[0].ptr;
++    assert(a[0].length == 16 && a[2].length == 16 && in[3] == 256);
++    if (step == 0) {
++        assert(in[0] == 0 && in[1] == UINT32_MAX && in[2] == 0);
++    } else {
++        const struct request *prev = &requests[step-1];
++        assert(in[0] == step && in[1] == prev->result);
++        if (prev->result) {
++            assert(in[2] == 0 && a[1].length == 0);
++        } else {
++            assert(in[2] == 12 && a[1].length == 12);
++            const uint32_t *encoded = (void *)(uintptr_t)a[1].ptr;
++            assert(encoded[0] == 4 && encoded[2] == 107);
++        }
++    }
++    if (step == sizeof(requests)/sizeof(requests[0])) return -EIO;
++    const struct request *r = &requests[step];
++    uint32_t word = 7, lens[] = {18,2,13,3};
++    struct fastrpc_io_buffer bufs[] = {
++        {sizeof(word), &word}, {18, "ADSP_LIBRARY_PATH"}, {2,";"},
++        {13,"sns_reg.conf"}, {3,"rb"}
++    };
++    size_t count = REMOTE_SCALARS_INBUFS(r->sc);
++    if (r->kind == 1) { bufs[0].p=lens; bufs[0].s=sizeof(lens); }
++    if (r->kind == 2) bufs[0].s=1;
++    size_t size=outbufs_calculate_size(count,bufs);
++    assert(size <= a[3].length);
++    outbufs_encode(count,bufs,(void *)(uintptr_t)a[3].ptr);
++    uint32_t *out = (void *)(uintptr_t)a[2].ptr;
++    out[0]=++step; out[1]=r->handle; out[2]=r->sc; out[3]=size;
++    return 0;
++}
++int main(void)
++{
++    struct fastrpc_interface *ifaces[] = {&iface};
++    assert(run_fastrpc_listener(-1,1,ifaces) == -EIO);
++    assert(step == sizeof(requests)/sizeof(requests[0]));
++    puts("listener rejects invalid requests, sends errors, and serves later calls");
++    return 0;
++}

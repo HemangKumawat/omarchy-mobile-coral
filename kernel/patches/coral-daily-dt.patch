@@ -1,0 +1,135 @@
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+index dbc360756..36f4670bc 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+@@ -41,6 +41,9 @@ &framebuffer0 {
+ &battery {
+ 	charge-full-design-microamp-hours = <3700000>;
+ 	energy-full-design-microwatt-hours = <14245000>;
++	/* Conservative bootstrap until pack telemetry is corroborated. */
++	voltage-max-design-microvolt = <4200000>;
++	constant-charge-current-max-microamp = <500000>;
+ };
+ 
+ /*
+@@ -50,8 +53,9 @@ &battery {
+  * the driver, as mainline panel drivers own their DSC config.
+  */
+ &mdss_dsi0 {
+-	panel@0 {
++	coral_panel: panel@0 {
+ 		compatible = "samsung,s6e3hc2";
++		touch-rate-gpios = <&tlmm 128 GPIO_ACTIVE_HIGH>;
+ 	};
+ };
+ 
+@@ -62,6 +66,9 @@ panel@0 {
+  * flame's blob must never reach the coral touch controller.
+  */
+ &touchscreen {
++	panel = <&coral_panel>;
++	wakeup-source;
++	/delete-property/ st,disp-rate-gpio;
+ 	st,max-coords = <1439 3039>;
+ 	st,disable-auto-fw-update;
+ 	firmware-name = "qcom/sm8150/google/coral/ftm5_fw_c2.ftb";
+@@ -124,3 +131,99 @@ &vreg_l4c_1p8 {
+ &spi8 { status = "disabled"; };
+ &spi10 { status = "disabled"; };
+ &spi11 { status = "disabled"; };
++
++/* Stock coral dtbo fragment79: CS40L25A board calibration, GPIOs and DSP clock. */
++&i2c15 {
++	haptics@43 {
++		compatible = "cirrus,cs40l25a";
++		reg = <0x43>;
++		reset-gpios = <&tlmm 152 GPIO_ACTIVE_HIGH>;
++		interrupt-parent = <&tlmm>;
++		interrupts = <129 IRQ_TYPE_LEVEL_LOW>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&coral_haptic_pins &coral_haptic_clk>;
++		cirrus,boost-ind-nanohenry = <1000>;
++		cirrus,boost-cap-microfarad = <4>;
++		cirrus,boost-ipk-milliamp = <4500>;
++		cirrus,boost-ctl-millivolt = <10000>;
++		cirrus,boost-ovp-millivolt = <11000>;
++		cirrus,f0-default = <0x265c50>;
++		cirrus,f0-min = <0x230000>;
++		cirrus,f0-max = <0x294000>;
++		cirrus,redc-comp-disable;
++		cirrus,redc-default = <0x50030>;
++		cirrus,redc-min = <0x49c20>;
++		cirrus,redc-max = <0x5a260>;
++		cirrus,gpio1-rise-index = <5>;
++		cirrus,gpio1-fall-index = <4>;
++		cirrus,gpio1-fall-timeout = <0xb8ae>;
++		cirrus,gpio1-mode = <2>;
++		cirrus,hiber-enable;
++		cirrus,refclk-gpio2;
++		cirrus,asp-bclk-freq-hz = <6144000>;
++		cirrus,asp-bclk-inv;
++		cirrus,asp-fmt = <0>;
++		cirrus,asp-slot-num = <2>;
++		cirrus,asp-slot-width = <32>;
++		cirrus,asp-samp-width = <24>;
++	};
++};
++
++&tlmm {
++	coral_haptic_pins: coral-haptic-pins-state {
++		reset-pins {
++			pins = "gpio152";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
++			output-low;
++		};
++		irq-pins {
++			pins = "gpio129";
++			function = "gpio";
++			bias-disable;
++		};
++	};
++};
++
++/* Stock sm8150-floral-haptics.dtsi: 32 kHz REFCLK on PM8150 GPIO3. */
++&pm8150_gpios {
++	coral_haptic_clk: coral-haptic-clk-state {
++		pins = "gpio3";
++		function = "func1";
++		bias-disable;
++		power-source = <0>;
++		output-low;
++		input-disable;
++	};
++};
++
++/* Internal VBAT mux: binding and adc5_chans_pmic both define 1/3 scaling.
++ * This is independent voltage evidence, not a replacement battery gauge.
++ * Stock battery thermistor is on FG-gen4, not a board/charger thermistor.
++ */
++&pm8150b_adc {
++	channel@84 {
++		reg = <ADC5_VBAT_SNS>;
++		qcom,pre-scaling = <1 3>;
++		label = "vbat_sns";
++	};
++};
++
++/* RX must stay idle-high when the Bluetooth controller tri-states TX.
++ * A floating GPIO46 can fabricate a falling-edge system wake at pinmux sleep.
++ */
++&qup_uart13_sleep {
++	pinconf-rx {
++		/delete-property/ bias-disable;
++		bias-pull-up;
++	};
++};
++
++/* PMIC alarms and PON keys must wake through the always-on PDC.
++ * SM8150 PDC port 1 maps to the same physical GIC SPI 481.
++ */
++&spmi_bus {
++	/delete-property/ interrupts;
++	interrupts-extended = <&pdc 1 IRQ_TYPE_LEVEL_HIGH>;
++};

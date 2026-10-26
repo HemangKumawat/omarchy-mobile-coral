@@ -1,0 +1,277 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* Coral camera wiring from Google's sm8150-coral-camera-sensor.dtsi. */
+
+&max77826 {
+	/* The GPIO mux must be applied before the PMIC's first register read. */
+	pinctrl-names = "default";
+};
+
+/* Stock module voltages; shared rails retain regulator reference counting. */
+&max77826_ldo1 { regulator-min-microvolt = <1100000>; regulator-max-microvolt = <1100000>; };
+&max77826_ldo3 { regulator-min-microvolt = <1050000>; regulator-max-microvolt = <1050000>; };
+&max77826_ldo5 { regulator-min-microvolt = <1800000>; regulator-max-microvolt = <1800000>; };
+&max77826_ldo6 { regulator-min-microvolt = <2800000>; regulator-max-microvolt = <2800000>; };
+&max77826_ldo7 { regulator-min-microvolt = <2900000>; regulator-max-microvolt = <2900000>; };
+&max77826_ldo10 { regulator-min-microvolt = <2800000>; regulator-max-microvolt = <2800000>; };
+&max77826_ldo11 { regulator-min-microvolt = <1800000>; regulator-max-microvolt = <1800000>; };
+&max77826_ldo12 { regulator-min-microvolt = <2800000>; regulator-max-microvolt = <2800000>; };
+&max77826_ldo13 { regulator-min-microvolt = <2800000>; regulator-max-microvolt = <2800000>; };
+&max77826_ldo14 { regulator-min-microvolt = <2800000>; regulator-max-microvolt = <2800000>; };
+&max77826_ldo15 { regulator-min-microvolt = <1850000>; regulator-max-microvolt = <1850000>; };
+&max77826_buck { regulator-min-microvolt = <1350000>; regulator-max-microvolt = <1350000>; };
+&max77826_buckboost { regulator-min-microvolt = <3300000>; regulator-max-microvolt = <3300000>; };
+
+&tlmm {
+	coral_cam_mclk0: coral-cam-mclk0-state {
+		pins = "gpio13";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-disable;
+	};
+	coral_cam_mclk1: coral-cam-mclk1-state {
+		pins = "gpio14";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-disable;
+	};
+	coral_cam_mclk2: coral-cam-mclk2-state {
+		pins = "gpio15";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-disable;
+	};
+};
+
+&pm8150l_gpios {
+	coral_cam_rear_resets: coral-cam-rear-resets-state {
+		pins = "gpio7", "gpio9";
+		function = "normal";
+		power-source = <1>;
+		bias-disable;
+		qcom,drive-strength = <2>;
+	};
+};
+
+&pm8150l_gpios {
+	coral_cam_front_resets: coral-cam-front-resets-state {
+		pins = "gpio3", "gpio6", "gpio12";
+		function = "normal";
+		bias-disable;
+		qcom,drive-strength = <2>;
+	};
+};
+
+&cci0 {
+	status = "okay";
+	pinctrl-0 = <&cci0_default &coral_cam_mclk0 &coral_cam_mclk1 &coral_cam_front_resets>;
+};
+
+&cci1 {
+	status = "okay";
+	pinctrl-0 = <&cci1_default &coral_cam_mclk2 &coral_cam_rear_resets>;
+};
+
+&cci0_i2c0 {
+	clock-frequency = <400000>;
+
+	ov7251_lead: camera@72 {
+		compatible = "ovti,ov7251";
+		reg = <0x72>;
+		ovti,fsin-role = "master";
+		ovti,probe-address = <0x60>;
+		/* One owner holds both sensors reset before assigning SCCB IDs. */
+		enable-gpios = <&pm8150l_gpios 12 GPIO_ACTIVE_HIGH>;
+		peer-enable-gpios = <&pm8150l_gpios 3 GPIO_ACTIVE_HIGH>;
+		clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		clock-names = "xclk";
+		clock-frequency = <24000000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clock-rates = <24000000>;
+		vdddo-supply = <&max77826_ldo11>;
+		vdda-supply = <&max77826_ldo7>;
+		vddd-supply = <&max77826_buck>;
+		vaux-supply = <&max77826_buckboost>;
+		rotation = <90>;
+		orientation = <0>;
+		port {
+			ov7251_lead_out: endpoint {
+				data-lanes = <0>;
+				clock-lanes = <1>;
+				link-frequencies = /bits/ 64 <240000000 319200000>;
+				remote-endpoint = <&coral_camss_ir_lead>;
+			};
+		};
+	};
+
+	ov7251_follow: camera@70 {
+		compatible = "ovti,ov7251";
+		reg = <0x70>;
+		ovti,fsin-role = "slave";
+		ovti,probe-address = <0x60>;
+		ovti,reset-provider = <&ov7251_lead>;
+		clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		clock-names = "xclk";
+		clock-frequency = <24000000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clock-rates = <24000000>;
+		vdddo-supply = <&max77826_ldo11>;
+		vdda-supply = <&max77826_ldo7>;
+		vddd-supply = <&max77826_buck>;
+		vaux-supply = <&max77826_buckboost>;
+		rotation = <90>;
+		orientation = <0>;
+		port {
+			ov7251_follow_out: endpoint {
+				data-lanes = <0>;
+				clock-lanes = <1>;
+				link-frequencies = /bits/ 64 <240000000 319200000>;
+				remote-endpoint = <&coral_camss_ir_follow>;
+			};
+		};
+	};
+	/* Shared IR-module calibration, 64 Kbit with 16-bit word addresses. */
+	coral_ir_calibration: eeprom@51 {
+		compatible = "atmel,24c64";
+		reg = <0x51>;
+		size = <8192>;
+		read-only;
+		vcc-supply = <&max77826_ldo11>;
+	};
+	/* Flood/dot stay absent: Silego + lens interlocks must be implemented first. */
+};
+
+&cci0_i2c1 {
+	clock-frequency = <400000>;
+	coral_front_calibration: eeprom@50 {
+		compatible = "atmel,24c64";
+		reg = <0x50>;
+		size = <8192>;
+		read-only;
+		vcc-supply = <&max77826_ldo11>;
+	};
+	imx520: camera@10 {
+		compatible = "sony,imx520";
+		reg = <0x10>;
+		reset-gpios = <&pm8150l_gpios 6 GPIO_ACTIVE_LOW>;
+		clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		clock-names = "xclk";
+		clock-frequency = <24000000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		assigned-clock-rates = <24000000>;
+		vana-supply = <&max77826_ldo10>;
+		vdig-supply = <&max77826_ldo3>;
+		vio-supply = <&max77826_ldo11>;
+		vextra0-supply = <&max77826_buck>;
+		vextra1-supply = <&max77826_buckboost>;
+		rotation = <90>;
+		orientation = <0>;
+		port {
+			imx520_out: endpoint {
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <675000000>;
+				remote-endpoint = <&coral_camss_front>;
+			};
+		};
+	};
+};
+
+&cci1_i2c0 {
+	clock-frequency = <400000>;
+	imx363: camera@10 {
+		compatible = "sony,imx363";
+		reg = <0x10>;
+		reset-gpios = <&pm8150l_gpios 9 GPIO_ACTIVE_HIGH>;
+		clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		clock-names = "xclk";
+		clock-frequency = <24000000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clock-rates = <24000000>;
+		vana-supply = <&max77826_ldo14>;
+		vdig-supply = <&max77826_ldo1>;
+		vio-supply = <&max77826_ldo5>;
+		vaf-supply = <&max77826_ldo12>;
+		vextra0-supply = <&max77826_ldo15>;
+		vextra1-supply = <&max77826_ldo6>;
+		vextra2-supply = <&max77826_buck>;
+		vextra3-supply = <&max77826_buckboost>;
+		rotation = <90>;
+		orientation = <1>;
+		port {
+			imx363_out: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <321000000 636000000>;
+				remote-endpoint = <&coral_camss_wide>;
+			};
+		};
+	};
+};
+
+&cci1_i2c1 {
+	clock-frequency = <400000>;
+	imx481: camera@1a {
+		compatible = "sony,imx481";
+		reg = <0x1a>;
+		reset-gpios = <&pm8150l_gpios 7 GPIO_ACTIVE_LOW>;
+		clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		clock-names = "xclk";
+		clock-frequency = <24000000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clock-rates = <24000000>;
+		vana-supply = <&max77826_ldo13>;
+		vdig-supply = <&max77826_ldo1>;
+		vio-supply = <&max77826_ldo5>;
+		vaf-supply = <&max77826_ldo12>;
+		vextra0-supply = <&max77826_ldo6>;
+		vextra1-supply = <&max77826_buck>;
+		vextra2-supply = <&max77826_buckboost>;
+		rotation = <90>;
+		orientation = <1>;
+		port {
+			imx481_out: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <654000000>;
+				remote-endpoint = <&coral_camss_tele>;
+			};
+		};
+	};
+};
+
+&camss {
+	status = "okay";
+	vdda-phy-supply = <&vreg_l5a_0p88>;
+	vdda-pll-supply = <&vreg_l3c_1p2>;
+	ports {
+		port@0 {
+			coral_camss_tele: endpoint {
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&imx481_out>;
+			};
+		};
+		port@1 {
+			coral_camss_wide: endpoint {
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&imx363_out>;
+			};
+		};
+		port@2 {
+			coral_camss_front: endpoint {
+				data-lanes = <0 1>;
+				remote-endpoint = <&imx520_out>;
+			};
+		};
+		port@3 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			coral_camss_ir_lead: endpoint@0 {
+				reg = <0>;
+				data-lanes = <0>;
+				remote-endpoint = <&ov7251_lead_out>;
+			};
+			coral_camss_ir_follow: endpoint@1 {
+				reg = <1>;
+				data-lanes = <2>;
+				remote-endpoint = <&ov7251_follow_out>;
+			};
+		};
+	};
+};

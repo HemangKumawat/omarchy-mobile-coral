@@ -1,0 +1,275 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Google Pixel 4 XL (coral). Derived from sm8150-google-flame.dts.
+ *
+ * Stock coral-tp1a.221005.002.b2 evidence:
+ *  - dtbo.img "Google Inc. MSM sm8150 Coral" overlay: board-id <0x51e05 0>
+ *    (flame: 0x61e05); regulators, touch (st,fts) and panel reset GPIO 67
+ *    are identical to flame. Differences: panel, battery profile, two
+ *    microchip,pac1934 power monitors (not described here), audio card name.
+ *  - bootloader: 0x9C400000, 0x02400000, "Display Reserved" (same as flame).
+ *  - panel: "s6e3hc2 amoled 6.2 cmd mode panel", 1440x3040, DSC.
+ *    Driver: drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c (branch coral-panel).
+ */
+
+#include "sm8150-google-flame.dts"
+
+/ {
+	model = "Google Pixel 4 XL";
+	compatible = "google,coral", "qcom,sm8150";
+	qcom,board-id = <0x00051e05 0x00000000>;
+
+};
+
+/*
+ * Bootloader-lit panel: the panel/DSI node is gone, so simplefb must hold the
+ * panel + DSI rails and the MDSS GDSC, else late cleanup cuts them and the
+ * screen goes dark (rails taken from flame panel@0, mdss_dsi0, mdss_dsi0_phy).
+ */
+&framebuffer0 {
+	width = <1440>;
+	height = <3040>;
+	stride = <(1440 * 4)>;
+	vddio-supply = <&vreg_l14a_1p8>;
+	vci-supply = <&vreg_l4c_1p8>;
+	vdda-supply = <&vreg_l3c_1p2>;
+	vdds-supply = <&vreg_l5a_0p88>;
+	power-domains = <&dispcc MDSS_GDSC>;
+};
+
+/* Pixel 4 XL: 3700 mAh rated; 3.85 V nominal kept from flame */
+&battery {
+	charge-full-design-microamp-hours = <3700000>;
+	energy-full-design-microwatt-hours = <14245000>;
+	/* Conservative bootstrap until pack telemetry is corroborated. */
+	voltage-max-design-microvolt = <4200000>;
+	constant-charge-current-max-microamp = <500000>;
+};
+
+/*
+ * Coral panel: Samsung s6e3hc2 (stock qcom,mdss_dsi_s6e3hc2). Same reset GPIO
+ * 67, vddio/vci rails, TE pin and 4 lanes as flame's panel@0, so only the
+ * compatible changes. DSC (slice 720x40, 8 bpc, 8 bpp, 2 slices) lives in
+ * the driver, as mainline panel drivers own their DSC config.
+ */
+&mdss_dsi0 {
+	coral_panel: panel@0 {
+		compatible = "samsung,s6e3hc2";
+		touch-rate-gpios = <&tlmm 128 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/*
+ * Touch: coral panel is 1440x3040 (flame 1080x2280).
+ * SAFETY: the downstream fts driver ignores firmware-name and always loads
+ * "ftm5_fw.ftb", reflashing the touch IC when it differs. Never auto-update:
+ * flame's blob must never reach the coral touch controller.
+ */
+&touchscreen {
+	panel = <&coral_panel>;
+	wakeup-source;
+	/delete-property/ st,disp-rate-gpio;
+	st,max-coords = <1439 3039>;
+	st,disable-auto-fw-update;
+	firmware-name = "qcom/sm8150/google/coral/ftm5_fw_c2.ftb";
+};
+
+&gpu {
+	zap-shader {
+		firmware-name = "qcom/sm8150/google/coral/a640_zap.mdt";
+	};
+};
+
+&remoteproc_adsp {
+	firmware-name = "qcom/sm8150/google/coral/adsp.mdt";
+};
+
+&remoteproc_cdsp {
+	firmware-name = "qcom/sm8150/google/coral/cdsp.mdt";
+};
+
+&remoteproc_mpss {
+	firmware-name = "qcom/sm8150/google/coral/modem.mdt";
+};
+
+/* pmOS andrew/6.16-sensors 2a070aeb: SDSP remote heap below 4 GiB. */
+/ {
+	/* Stock DSPS entry; also prevents the upstream sar.cc:27 CHRE fatal. */
+	smp2p-slpi {
+		sleepstate {
+			qcom,entry-name = "sleepstate";
+			#qcom,smem-state-cells = <1>;
+		};
+	};
+
+	reserved-memory {
+		coral_fastrpc_mem: fastrpc {
+			compatible = "shared-dma-pool";
+			alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+			alignment = <0x0 0x400000>;
+			size = <0x0 0x1000000>;
+			reusable;
+		};
+	};
+};
+
+&remoteproc_slpi {
+	status = "okay";
+	firmware-name = "qcom/sm8150/google/coral/slpi.mdt";
+
+	glink-edge {
+		fastrpc {
+			/* Stock normal-boot pool owners; MSS_MSA is restore-only. */
+			qcom,vmids = <QCOM_SCM_VMID_HLOS QCOM_SCM_VMID_SSC_Q6
+				      QCOM_SCM_VMID_ADSP_Q6>;
+			memory-region = <&coral_fastrpc_mem>;
+
+			/* Stock sm8150 SDSP context banks are coherent. */
+			compute-cb@1 {
+				dma-coherent;
+			};
+			compute-cb@2 {
+				dma-coherent;
+			};
+			compute-cb@3 {
+				dma-coherent;
+			};
+		};
+	};
+};
+
+
+/*
+ * Radios (coral-radio). Stock vendor.img ships exactly one WCN3990 BT pair
+ * (crbtfw21.tlv + crnv21.bin, i.e. ROM 0x21) and bdwlan-coral.bin (26328 B =
+ * WCN3990_BOARD_DATA_SZ). linux-firmware has no Google_coral board entry, so
+ * without these the chip falls back to the generic "qmi-board-id=ff" data.
+ */
+&wifi {
+	/* ath10k snoc: firmware-name is a subdir -> ath10k/WCN3990/hw1.0/coral/board-2.bin */
+	firmware-name = "coral";
+	qcom,calibration-variant = "Google_coral";
+};
+
+&bluetooth {
+	/* btqca: "qca/" + name; vendor NVM and its matching rampatch */
+	firmware-name = "coral/crnv21.bin", "coral/crbtfw21.tlv";
+};
+
+/*
+ * No &ipa (mobile data): sm8150 is IPA v4.1 and drivers/net/ipa has no v4.1
+ * data or compatible, and sm8150.dtsi has no ipa node. Porting that is driver
+ * work (ref OnePlus 7 Pro / raphael downstream ports), not a dts line.
+ */
+
+/* Factory dtbo.10 dsi_panel_pwr_supply_floral: vci min=max=3000000 uV. */
+&vreg_l4c_1p8 {
+	regulator-min-microvolt = <3000000>;
+	regulator-max-microvolt = <3000000>;
+};
+
+/* Unused SPI buses; touchscreen remains on spi0. */
+&spi6 { status = "disabled"; };
+&spi8 { status = "disabled"; };
+&spi10 { status = "disabled"; };
+&spi11 { status = "disabled"; };
+
+/* Stock coral dtbo fragment79: CS40L25A board calibration, GPIOs and DSP clock. */
+&i2c15 {
+	haptics@43 {
+		compatible = "cirrus,cs40l25a";
+		reg = <0x43>;
+		reset-gpios = <&tlmm 152 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <129 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&coral_haptic_pins &coral_haptic_clk>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <4>;
+		cirrus,boost-ipk-milliamp = <4500>;
+		cirrus,boost-ctl-millivolt = <10000>;
+		cirrus,boost-ovp-millivolt = <11000>;
+		cirrus,f0-default = <0x265c50>;
+		cirrus,f0-min = <0x230000>;
+		cirrus,f0-max = <0x294000>;
+		cirrus,redc-comp-disable;
+		cirrus,redc-default = <0x50030>;
+		cirrus,redc-min = <0x49c20>;
+		cirrus,redc-max = <0x5a260>;
+		cirrus,gpio1-rise-index = <5>;
+		cirrus,gpio1-fall-index = <4>;
+		cirrus,gpio1-fall-timeout = <0xb8ae>;
+		cirrus,gpio1-mode = <2>;
+		cirrus,hiber-enable;
+		cirrus,refclk-gpio2;
+		cirrus,asp-bclk-freq-hz = <6144000>;
+		cirrus,asp-bclk-inv;
+		cirrus,asp-fmt = <0>;
+		cirrus,asp-slot-num = <2>;
+		cirrus,asp-slot-width = <32>;
+		cirrus,asp-samp-width = <24>;
+	};
+};
+
+&tlmm {
+	coral_haptic_pins: coral-haptic-pins-state {
+		reset-pins {
+			pins = "gpio152";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+			output-low;
+		};
+		irq-pins {
+			pins = "gpio129";
+			function = "gpio";
+			bias-disable;
+		};
+	};
+};
+
+/* Stock sm8150-floral-haptics.dtsi: 32 kHz REFCLK on PM8150 GPIO3. */
+&pm8150_gpios {
+	coral_haptic_clk: coral-haptic-clk-state {
+		pins = "gpio3";
+		function = "func1";
+		bias-disable;
+		power-source = <0>;
+		output-low;
+		input-disable;
+	};
+};
+
+/* Internal VBAT mux: binding and adc5_chans_pmic both define 1/3 scaling.
+ * This is independent voltage evidence, not a replacement battery gauge.
+ * Stock battery thermistor is on FG-gen4, not a board/charger thermistor.
+ */
+&pm8150b_adc {
+	channel@84 {
+		reg = <ADC5_VBAT_SNS>;
+		qcom,pre-scaling = <1 3>;
+		label = "vbat_sns";
+	};
+};
+
+/* RX must stay idle-high when the Bluetooth controller tri-states TX.
+ * A floating GPIO46 can fabricate a falling-edge system wake at pinmux sleep.
+ */
+&qup_uart13_sleep {
+	pinconf-rx {
+		/delete-property/ bias-disable;
+		bias-pull-up;
+	};
+};
+
+/* PMIC alarms and PON keys must wake through the always-on PDC.
+ * SM8150 PDC port 1 maps to the same physical GIC SPI 481.
+ */
+&spmi_bus {
+	/delete-property/ interrupts;
+	interrupts-extended = <&pdc 1 IRQ_TYPE_LEVEL_HIGH>;
+};
+
+#include "sm8150-google-coral-audio.dtsi"
+
+#include "sm8150-google-coral-cameras.dtsi"

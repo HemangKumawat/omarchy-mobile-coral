@@ -1,0 +1,64 @@
+--- a/drivers/media/i2c/imx363.c
++++ b/drivers/media/i2c/imx363.c
+@@ -1005,11 +1005,22 @@
+ 	struct imx363 *imx363 = to_imx363(sd);
+ 	int ret;
+ 
++	/* Stock Coral custom2/LDO6: the PVT safety controller also uses 3.2V. */
++	ret = regulator_set_voltage(imx363->supplies[5].consumer, 2800000, 2800000);
++	if (ret)
++		return ret;
+ 	ret = regulator_bulk_enable(IMX363_NUM_SUPPLIES,
+ 				    imx363->supplies);
+ 	if (ret) {
+ 		dev_err(dev, "%s: failed to enable regulators\n",
+ 			__func__);
++		/* A failed bulk-enable rollback may leave the rail powered. */
++		if (regulator_is_enabled(imx363->supplies[5].consumer) != 0) {
++			dev_err(dev, "shared rail state uncertain; 2.8V vote retained\n");
++			return ret;
++		}
++		if (regulator_set_voltage(imx363->supplies[5].consumer, 0, 3200000))
++			dev_err(dev, "failed to release shared safety rail vote\n");
+ 		return ret;
+ 	}
+ 
+@@ -1020,7 +1031,12 @@
+ 	ret = clk_prepare_enable(imx363->clk);
+ 	if (ret) {
+ 		dev_err(dev, "failed to enable clock\n");
+-		regulator_bulk_disable(IMX363_NUM_SUPPLIES, imx363->supplies);
++		gpiod_set_value_cansleep(imx363->reset_gpio, 0);
++		if (regulator_bulk_disable(IMX363_NUM_SUPPLIES, imx363->supplies))
++			dev_err(dev, "failed to disable supplies; shared vote retained\n");
++		else if (regulator_set_voltage(imx363->supplies[5].consumer, 0, 3200000))
++			dev_err(dev, "failed to release shared safety rail vote\n");
++		return ret;
+ 	}
+ 
+ 	usleep_range(1000, 1200);
+@@ -1032,14 +1048,21 @@
+ {
+ 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+ 	struct imx363 *imx363 = to_imx363(sd);
++	int ret;
+ 
+ 	clk_disable_unprepare(imx363->clk);
+ 
+ 	gpiod_set_value_cansleep(imx363->reset_gpio, 0);
+ 
+-	regulator_bulk_disable(IMX363_NUM_SUPPLIES, imx363->supplies);
+-
+-	return 0;
++	ret = regulator_bulk_disable(IMX363_NUM_SUPPLIES, imx363->supplies);
++	if (ret) {
++		dev_err(dev, "power-off failed; shared 2.8V vote retained: %d\n", ret);
++		return ret;
++	}
++	ret = regulator_set_voltage(imx363->supplies[5].consumer, 0, 3200000);
++	if (ret)
++		dev_err(dev, "shared safety rail vote release failed: %d\n", ret);
++	return ret;
+ }
+ 
+ static int imx363_set_stream(struct v4l2_subdev *sd, int enable)

@@ -1,0 +1,306 @@
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
+index 6ada1a6a6..444a65dc5 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
+@@ -1,43 +1,55 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ // Generated with linux-mdss-dsi-panel-driver-generator (28c4df2) from the
+ // Google coral (Pixel 4 XL) stock dtbo, board-id 0x51e05, node
+ // qcom,mdss_dsi_s6e3hc2 ("s6e3hc2 amoled 6.2 cmd mode panel").
+ // Supplies and voltages from dsi_panel_pwr_supply_floral in the same dtbo.
+-// ponytail: 60 Hz timing@0 only; timing@1 (90 Hz) differs only in framerate.
++// Stock timings, rate commands and per-panel gamma for 60/90 Hz.
+ 
+ #include <linux/backlight.h>
+ #include <linux/delay.h>
+ #include <linux/mod_devicetable.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/regulator/consumer.h>
+ 
+ #include <video/mipi_display.h>
+ 
+ #include <drm/display/drm_dsc.h>
+ #include <drm/display/drm_dsc_helper.h>
+ #include <drm/drm_mipi_dsi.h>
++#include <drm/drm_connector.h>
++#include <drm/drm_crtc.h>
+ #include <drm/drm_modes.h>
+ #include <drm/drm_panel.h>
+ #include <drm/drm_probe_helper.h>
+ 
+ struct s6e3hc2 {
+ 	struct drm_panel panel;
+ 	struct mipi_dsi_device *dsi;
+ 	struct drm_dsc_config dsc;
+ 	struct regulator_bulk_data *supplies;
+ 	struct gpio_desc *reset_gpio;
++	struct gpio_desc *touch_rate_gpio;
++	struct drm_connector *connector;
++	struct mutex lock;
++	unsigned int refresh_rate, lp_mode;
++	bool powered, gamma_ready;
++	u8 gamma[2][3][181];
+ };
+ 
++#include "panel-samsung-s6e3hc2-gamma.h"
++#include "panel-samsung-s6e3hc2-lp.h"
++
+ /* stock: vddio 1.84 V, vci 3.0 V (qcom,panel-supply-entry@0/1) */
+ static const struct regulator_bulk_data s6e3hc2_supplies[] = {
+ 	{ .supply = "vddio" },
+ 	{ .supply = "vci" },
+ };
+ 
+ static const int s6e3hc2_supply_uV[] = { 1840000, 3000000 };
+ 
+ static inline struct s6e3hc2 *to_s6e3hc2(struct drm_panel *panel)
+ {
+ 	return container_of_const(panel, struct s6e3hc2, panel);
+ }
+@@ -46,68 +58,85 @@ static void s6e3hc2_reset(struct s6e3hc2 *ctx)
+ {
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+ 	usleep_range(10000, 11000);
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+ 	usleep_range(1000, 2000);
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+ 	usleep_range(5000, 6000);
+ }
+ 
+ static int s6e3hc2_on(struct s6e3hc2 *ctx)
+ {
+ 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++	u8 ctrl[] = { MIPI_DCS_WRITE_CONTROL_DISPLAY,
++		      ctx->refresh_rate == 90 ? 0x30 : 0x20 };
++	int ret;
+ 
+ 	mipi_dsi_compression_mode_multi(&dsi_ctx, true);
+ 	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+ 	mipi_dsi_msleep(&dsi_ctx, 120);
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY,
+-				     0x20);
++	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, ctrl, sizeof(ctrl));
+ 	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf1, 0x5a, 0x5a);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfc, 0x5a, 0x5a);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x3c, 0xb5);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb5, 0x9c, 0xd5);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf7, 0x02);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x86, 0xeb);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xeb, 0x01);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x68, 0x21);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x69, 0x01);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0xa5, 0xa5);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf1, 0xa5, 0xa5);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfc, 0xa5, 0xa5);
++	if (dsi_ctx.accum_err)
++		return dsi_ctx.accum_err;
++	if (ctx->gamma_ready) {
++		ret = s6e3hc2_gamma_write(ctx);
++		if (ret)
++			return ret;
++	}
++	gpiod_set_value_cansleep(ctx->touch_rate_gpio, ctx->refresh_rate == 90);
+ 	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
+ 
+ 	return dsi_ctx.accum_err;
+ }
+ 
+ static int s6e3hc2_off(struct s6e3hc2 *ctx)
+ {
+ 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+ 
+ 	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
+ 	mipi_dsi_usleep_range(&dsi_ctx, 10000, 11000);
+ 	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
+ 	mipi_dsi_msleep(&dsi_ctx, 120);
+ 
+ 	return dsi_ctx.accum_err;
+ }
+ 
+ static int s6e3hc2_prepare(struct drm_panel *panel)
+ {
+ 	struct s6e3hc2 *ctx = to_s6e3hc2(panel);
+ 	struct device *dev = &ctx->dsi->dev;
+ 	struct drm_dsc_picture_parameter_set pps;
+ 	int ret;
+ 
++	guard(mutex)(&ctx->lock);
++	ctx->refresh_rate = 60;
++	if (ctx->connector && ctx->connector->state && ctx->connector->state->crtc)
++		ctx->refresh_rate = drm_mode_vrefresh(
++			&ctx->connector->state->crtc->state->mode);
++	if (ctx->refresh_rate != 60 && ctx->refresh_rate != 90)
++		return -EINVAL;
+ 	ret = regulator_bulk_enable(ARRAY_SIZE(s6e3hc2_supplies), ctx->supplies);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to enable regulators: %d\n", ret);
+ 		return ret;
+ 	}
+ 
+ 	s6e3hc2_reset(ctx);
+ 
+ 	ret = s6e3hc2_on(ctx);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to initialize panel: %d\n", ret);
+ 		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+@@ -121,49 +150,70 @@ static int s6e3hc2_prepare(struct drm_panel *panel)
+ 	if (ret < 0) {
+ 		dev_err(panel->dev, "failed to transmit PPS: %d\n", ret);
+ 		return ret;
+ 	}
+ 
+ 	ret = mipi_dsi_compression_mode(ctx->dsi, true);
+ 	if (ret < 0) {
+ 		dev_err(dev, "failed to enable compression mode: %d\n", ret);
+ 		return ret;
+ 	}
+ 
+ 	msleep(28); /* TODO: Is this panel-dependent? */
++	ctx->powered = true;
++	ctx->lp_mode = 0;
+ 
+ 	return 0;
+ }
+ 
+ static int s6e3hc2_enable(struct drm_panel *panel)
+ {
+ 	struct s6e3hc2 *ctx = to_s6e3hc2(panel);
+ 	u8 mode = 0;
+ 	int ret;
+ 
++	guard(mutex)(&ctx->lock);
+ 	ret = mipi_dsi_dcs_get_power_mode(ctx->dsi, &mode);
+ 	if (ret < 0) {
+ 		dev_err(panel->dev, "DCS power mode read failed: %d\n", ret);
+ 		return ret;
+ 	}
++	/* Read at 90 Hz after display-on; keep the 60 Hz bootstrap defaults. */
++	if (ctx->refresh_rate == 90 && !ctx->gamma_ready) {
++		ret = s6e3hc2_gamma_read(ctx);
++		if (ret) {
++			dev_err(panel->dev, "Failed to read panel calibration: %d\n", ret);
++			return ret;
++		}
++	}
++	if (ctx->gamma_ready) {
++		ret = s6e3hc2_gamma_write(ctx);
++		if (ret) {
++			dev_err(panel->dev, "Failed to apply panel calibration: %d\n", ret);
++			return ret;
++		}
++	}
+ 	dev_info(panel->dev, "coral DCS power mode: 0x%02x\n", mode);
+ 	return 0;
+ }
+ 
+ static int s6e3hc2_unprepare(struct drm_panel *panel)
+ {
+ 	struct s6e3hc2 *ctx = to_s6e3hc2(panel);
+ 	struct device *dev = &ctx->dsi->dev;
+ 	int ret;
+ 
++	guard(mutex)(&ctx->lock);
++	ctx->powered = false;
++	ctx->lp_mode = 0;
+ 	ret = s6e3hc2_off(ctx);
+ 	if (ret < 0)
+ 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
+ 
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+ 	regulator_bulk_disable(ARRAY_SIZE(s6e3hc2_supplies), ctx->supplies);
+ 
+ 	return 0;
+ }
+ 
+ static const struct drm_display_mode s6e3hc2_mode = {
+ 	.clock = (1440 + 56 + 16 + 28) * (3040 + 12 + 4 + 16) * 60 / 1000,
+@@ -174,25 +224,43 @@ static const struct drm_display_mode s6e3hc2_mode = {
+ 	.vdisplay = 3040,
+ 	.vsync_start = 3040 + 12,
+ 	.vsync_end = 3040 + 12 + 4,
+ 	.vtotal = 3040 + 12 + 4 + 16,
+ 	.width_mm = 68,
+ 	.height_mm = 143,
+ 	.type = DRM_MODE_TYPE_DRIVER,
+ };
+ 
+ static int s6e3hc2_get_modes(struct drm_panel *panel,
+ 			     struct drm_connector *connector)
+ {
+-	return drm_connector_helper_get_modes_fixed(connector, &s6e3hc2_mode);
++	struct s6e3hc2 *ctx = to_s6e3hc2(panel);
++	struct drm_display_mode *mode;
++	int rate;
++
++	for (rate = 60; rate <= 90; rate += 30) {
++		mode = drm_mode_duplicate(connector->dev, &s6e3hc2_mode);
++		if (!mode)
++			return -ENOMEM;
++		mode->clock = 1540 * 3072 * rate / 1000;
++		/* Keep the firmware splash rate for the initial fbdev modeset. */
++		mode->type |= rate == 60 ? DRM_MODE_TYPE_PREFERRED : 0;
++		drm_mode_set_name(mode);
++		drm_mode_probed_add(connector, mode);
++	}
++	connector->display_info.bpc = 8;
++	connector->display_info.width_mm = 68;
++	connector->display_info.height_mm = 143;
++	ctx->connector = connector;
++	return 2;
+ }
+ 
+ static const struct drm_panel_funcs s6e3hc2_panel_funcs = {
+ 	.prepare = s6e3hc2_prepare,
+ 	.enable = s6e3hc2_enable,
+ 	.unprepare = s6e3hc2_unprepare,
+ 	.get_modes = s6e3hc2_get_modes,
+ };
+ 
+ static int s6e3hc2_bl_update_status(struct backlight_device *bl)
+ {
+ 	struct mipi_dsi_device *dsi = bl_get_data(bl);
+@@ -271,31 +339,40 @@ static int s6e3hc2_probe(struct mipi_dsi_device *dsi)
+ 					    s6e3hc2_supply_uV[i]);
+ 		if (ret < 0)
+ 			return dev_err_probe(dev, ret, "Failed to set %s voltage\n",
+ 					     ctx->supplies[i].supply);
+ 	}
+ 
+ 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
+ 	if (IS_ERR(ctx->reset_gpio))
+ 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
+ 				     "Failed to get reset-gpios\n");
+ 
+ 	ctx->dsi = dsi;
++	mutex_init(&ctx->lock);
++	ctx->refresh_rate = 60;
+ 	mipi_dsi_set_drvdata(dsi, ctx);
+ 
+ 	dsi->lanes = 4;
+ 	dsi->format = MIPI_DSI_FMT_RGB888;
+ 	dsi->mode_flags = MIPI_DSI_MODE_NO_EOT_PACKET |
+ 			  MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM;
+ 
++	ctx->touch_rate_gpio = devm_gpiod_get_optional(dev, "touch-rate", GPIOD_OUT_LOW);
++	if (IS_ERR(ctx->touch_rate_gpio))
++		return dev_err_probe(dev, PTR_ERR(ctx->touch_rate_gpio), "touch rate GPIO\n");
++	ret = devm_device_add_group(dev, &s6e3hc2_attr_group);
++	if (ret)
++		return ret;
++
+ 	ctx->panel.prepare_prev_first = true;
+ 
+ 	ctx->panel.backlight = s6e3hc2_create_backlight(dsi);
+ 	if (IS_ERR(ctx->panel.backlight))
+ 		return dev_err_probe(dev, PTR_ERR(ctx->panel.backlight),
+ 				     "Failed to create backlight\n");
+ 
+ 	/* ponytail: 6.17 has no devm_drm_panel_add; manual add/remove */
+ 	drm_panel_add(&ctx->panel);
+ 
+ 	/* This panel only supports DSC; unconditionally enable it */
+ 	dsi->dsc = &ctx->dsc;

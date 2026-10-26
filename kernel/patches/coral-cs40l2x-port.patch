@@ -1,0 +1,201 @@
+--- a/cs40l2x.c
++++ b/cs40l2x.c
+@@ -32,7 +32,7 @@
+ #include <linux/hrtimer.h>
+ #include <linux/of_device.h>
+ #include <linux/platform_device.h>
+-#include <linux/platform_data/cs40l2x.h>
++#include "cs40l2x-platform.h"
+ 
+ #include "cs40l2x.h"
+ 
+@@ -41,6 +41,16 @@
+ #else
+ #include <linux/leds.h>
+ #endif /* CONFIG_ANDROID_TIMED_OUTPUT */
++
++/* Retain the old API's length-return convention used by queue parsing. */
++static size_t cs40l2x_strlcpy(char *dst, const char *src, size_t size)
++{
++	size_t len = strlen(src);
++
++	if (size)
++		strscpy(dst, src, size);
++	return len;
++}
+ 
+ struct cs40l2x_private {
+ 	struct device *dev;
+@@ -250,7 +260,7 @@
+ 			ret = -EPERM;
+ 			break;
+ 		}
+-		/* intentionally fall through */
++		fallthrough;
+ 	case CS40L2X_INDEX_DIAG:
+ 		if (cs40l2x->fw_desc->id == cs40l2x->fw_id_remap)
+ 			ret = cs40l2x_firmware_swap(cs40l2x,
+@@ -368,13 +378,13 @@
+ 	cs40l2x->pbq_repeat = 0;
+ 
+ 	pbq_str = pbq_str_alloc;
+-	strlcpy(pbq_str, buf, count);
++	cs40l2x_strlcpy(pbq_str, buf, count);
+ 
+ 	pbq_str_tok = strsep(&pbq_str, ",");
+ 
+ 	while (pbq_str_tok) {
+ 		pbq_seg = pbq_seg_alloc;
+-		pbq_seg_len = strlcpy(pbq_seg, strim(pbq_str_tok),
++		pbq_seg_len = cs40l2x_strlcpy(pbq_seg, strim(pbq_str_tok),
+ 				CS40L2X_PBQ_SEG_LEN_MAX + 1);
+ 		if (pbq_seg_len > CS40L2X_PBQ_SEG_LEN_MAX) {
+ 			ret = -E2BIG;
+@@ -4706,7 +4716,7 @@
+ 						(cs40l2x->vibe_timeout % 1000)
+ 						* 1000000),
+ 				HRTIMER_MODE_REL);
+-		/* intentionally fall through */
++		fallthrough;
+ 
+ #endif /* CONFIG_ANDROID_TIMED_OUTPUT */
+ 	case CS40L2X_INDEX_PBQ:
+@@ -4958,7 +4968,7 @@
+ 				cs40l2x->peak_gpio1_enable);
+ 		if (ret)
+ 			dev_err(dev, "Failed to restore GPIO1 configuration\n");
+-		/* intentionally fall through */
++		fallthrough;
+ 
+ 	case CS40L2X_INDEX_VIBE:
+ 	case CS40L2X_INDEX_CONT_MIN ... CS40L2X_INDEX_CONT_MAX:
+@@ -6077,7 +6087,7 @@
+ 				break;
+ 			case CS40L2X_ALGO_ID_VIBE:
+ 				wt_found = true;
+-				/* intentionally fall through */
++				fallthrough;
+ 			default:
+ 				dblk_index = NULL;
+ 			}
+@@ -6201,15 +6211,15 @@
+ 		if (!strncmp(cs40l2x->wt_file,
+ 				CS40L2X_WT_FILE_NAME_MISSING,
+ 				CS40L2X_WT_FILE_NAME_LEN_MAX))
+-			strlcpy(cs40l2x->wt_file,
++			cs40l2x_strlcpy(cs40l2x->wt_file,
+ 					CS40L2X_WT_FILE_NAME_DEFAULT,
+ 					CS40L2X_WT_FILE_NAME_LEN_MAX);
+ 
+ 		if (*wt_date != '\0')
+-			strlcpy(cs40l2x->wt_date, wt_date,
++			cs40l2x_strlcpy(cs40l2x->wt_date, wt_date,
+ 					CS40L2X_WT_FILE_DATE_LEN_MAX);
+ 		else
+-			strlcpy(cs40l2x->wt_date,
++			cs40l2x_strlcpy(cs40l2x->wt_date,
+ 					CS40L2X_WT_FILE_DATE_MISSING,
+ 					CS40L2X_WT_FILE_DATE_LEN_MAX);
+ 	}
+@@ -6456,7 +6466,7 @@
+ 		return;
+ 
+ 	for (i = 0; i < cs40l2x->fw_desc->num_coeff_files; i++)
+-		request_firmware_nowait(THIS_MODULE, FW_ACTION_HOTPLUG,
++		request_firmware_nowait(THIS_MODULE, true,
+ 				cs40l2x->fw_desc->coeff_files[i], dev,
+ 				GFP_KERNEL, cs40l2x, cs40l2x_coeff_file_load);
+ }
+@@ -6611,7 +6621,7 @@
+ 	if (ret1)
+ 		return ret1;
+ 
+-	strlcpy(cs40l2x->wt_file, wt_file, CS40L2X_WT_FILE_NAME_LEN_MAX);
++	cs40l2x_strlcpy(cs40l2x->wt_file, wt_file, CS40L2X_WT_FILE_NAME_LEN_MAX);
+ 
+ 	ret1 = regmap_write(regmap,
+ 			cs40l2x_dsp_reg(cs40l2x, "NUMBEROFWAVES",
+@@ -8193,7 +8203,7 @@
+ 		case CS40L2X_EVENT_CTRL_TRIG_STOP:
+ 			queue_work(cs40l2x->vibe_workqueue,
+ 					&cs40l2x->vibe_pbq_work);
+-			/* intentionally fall through */
++			fallthrough;
+ 		case CS40L2X_EVENT_CTRL_GPIO_STOP:
+ 			if (asp_timeout > 0)
+ 				hrtimer_start(&cs40l2x->asp_timer,
+@@ -8204,7 +8214,7 @@
+ 			else
+ 				queue_work(cs40l2x->vibe_workqueue,
+ 						&cs40l2x->vibe_mode_work);
+-			/* intentionally fall through */
++			fallthrough;
+ 		case CS40L2X_EVENT_CTRL_GPIO1_FALL
+ 			... CS40L2X_EVENT_CTRL_GPIO_START:
+ 		case CS40L2X_EVENT_CTRL_READY:
+@@ -8262,8 +8272,7 @@
+ 	.cache_type = REGCACHE_NONE,
+ };
+ 
+-static int cs40l2x_i2c_probe(struct i2c_client *i2c_client,
+-				const struct i2c_device_id *id)
++static int cs40l2x_i2c_probe(struct i2c_client *i2c_client)
+ {
+ 	int ret, i;
+ 	struct cs40l2x_private *cs40l2x;
+@@ -8280,11 +8289,11 @@
+ 
+ 	mutex_init(&cs40l2x->lock);
+ 
+-	hrtimer_init(&cs40l2x->pbq_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	cs40l2x->pbq_timer.function = cs40l2x_pbq_timer;
+-
+-	hrtimer_init(&cs40l2x->asp_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	cs40l2x->asp_timer.function = cs40l2x_asp_timer;
++	hrtimer_setup(&cs40l2x->pbq_timer, cs40l2x_pbq_timer,
++		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++
++	hrtimer_setup(&cs40l2x->asp_timer, cs40l2x_asp_timer,
++		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 
+ 	cs40l2x->vibe_workqueue =
+ 		alloc_ordered_workqueue("vibe_workqueue", WQ_HIGHPRI);
+@@ -8351,10 +8360,10 @@
+ 	cs40l2x->comp_enable_redc = !pdata->redc_comp_disable;
+ 	cs40l2x->comp_enable_f0 = true;
+ 
+-	strlcpy(cs40l2x->wt_file,
++	cs40l2x_strlcpy(cs40l2x->wt_file,
+ 			CS40L2X_WT_FILE_NAME_MISSING,
+ 			CS40L2X_WT_FILE_NAME_LEN_MAX);
+-	strlcpy(cs40l2x->wt_date,
++	cs40l2x_strlcpy(cs40l2x->wt_date,
+ 			CS40L2X_WT_FILE_DATE_MISSING,
+ 			CS40L2X_WT_FILE_DATE_LEN_MAX);
+ 
+@@ -8438,7 +8447,7 @@
+ 	if (ret)
+ 		goto err;
+ 
+-	request_firmware_nowait(THIS_MODULE, FW_ACTION_HOTPLUG,
++	request_firmware_nowait(THIS_MODULE, true,
+ 			cs40l2x->fw_desc->fw_file, dev, GFP_KERNEL, cs40l2x,
+ 			cs40l2x_firmware_load);
+ 
+@@ -8451,7 +8460,7 @@
+ 	return ret;
+ }
+ 
+-static int cs40l2x_i2c_remove(struct i2c_client *i2c_client)
++static void cs40l2x_i2c_remove(struct i2c_client *i2c_client)
+ {
+ 	struct cs40l2x_private *cs40l2x = i2c_get_clientdata(i2c_client);
+ 
+@@ -8495,7 +8504,6 @@
+ 
+ 	mutex_destroy(&cs40l2x->lock);
+ 
+-	return 0;
+ }
+ 
+ static int __maybe_unused cs40l2x_suspend(struct device *dev)
