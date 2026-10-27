@@ -54,7 +54,3 @@ version values used by `#30` and reproduces the 12-entry `dtb-12` byte-for-byte.
 | `#25` | 19 Oct 06:07 | audio and SLPI experiment trees (`65adbcf4ac89`..`52f2c29b0a60`, `0001`..`0009`) | Booted from RAM only (`out-audio-20261019`). Its working tree changed after the build, so its exact source is not byte-proven. Superseded by the series above. |
 | `#27` | 19 Oct 12:31 | camera experiment trees (`d3dd05299ff8`..`fec403571c23`, `0001`..`0011`) | Booted from RAM only (`out-cameras-20261019`). Same caveat. Superseded by the series above. |
 
-## Not in this repository
-
-The owner's private app launchers (`tools/phone_apps.py`). `tools/build-rootfs.py` builds the same root
-without them.

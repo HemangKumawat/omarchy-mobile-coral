@@ -86,7 +86,7 @@ def verify_touch_readonly(system_map, dtb, out):
     symbols = {line.split()[-1] for line in system_map.read_text().splitlines() if line.split()}
     assert not forbidden & symbols, 'Touch maintenance handlers remain compiled'
     spec = importlib.util.spec_from_file_location(
-        'matched', Path(__file__).with_name('pixel4xl_rescue_matched.py'))
+        'matched', Path(__file__).with_name('pack-matched-dtb.py'))
     matched = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(matched)
     trees = matched.split_dtbs(dtb)

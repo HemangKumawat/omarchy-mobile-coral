@@ -3,7 +3,6 @@
 """Stage the pinned phone shell; never run upstream's phone installer."""
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,15 +10,6 @@ import re
 import shutil
 import subprocess
 import tarfile
-
-# The owner's private app launchers (phone_apps.py) are not published; without them the rootfs
-# is the same image minus those launchers.
-_apps_path = Path(__file__).with_name('phone_apps.py')
-phone_apps = None
-if _apps_path.exists():
-    _apps_spec = importlib.util.spec_from_file_location('phone_apps', _apps_path)
-    phone_apps = importlib.util.module_from_spec(_apps_spec)
-    _apps_spec.loader.exec_module(phone_apps)
 
 BASE = Path(os.environ.get('CORAL_WORK', 'work')) / 'omamobile'
 HERE = Path(__file__).resolve().parent
@@ -134,7 +124,6 @@ def main():
     parser.add_argument('--cameras', action='store_true')
     parser.add_argument('--camera-runtime', type=Path)
     parser.add_argument('--camera-runtime-sha256')
-    parser.add_argument('--phone-apps', action='store_true')
     args = parser.parse_args()
     if args.soli and not (args.audio and args.sensors):
         raise ValueError('--soli requires --audio and --sensors')
@@ -337,12 +326,6 @@ def main():
     manifest['audio'] = args.audio
     manifest['soli'] = args.soli
     manifest['cameras'] = args.cameras
-    manifest['phone_apps'] = args.phone_apps
-    if args.phone_apps:
-        if not args.camera_runtime:
-            raise ValueError('Phone apps require their reviewed complete dynamic runtime')
-        if phone_apps:
-            phone_apps.stage(HERE, output)
     for path in sorted(output.rglob('*')):
         if path.is_symlink():
             manifest['files'][str(path.relative_to(output))] = {'link': os.readlink(path)}

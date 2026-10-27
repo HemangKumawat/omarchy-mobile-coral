@@ -42,7 +42,7 @@ def main():
     existing = sys.argv[1:] == ['--verify-existing']
     if sys.argv[1:] and not existing:
         raise ValueError('Only --verify-existing is supported')
-    run('python3', '-I', Path(__file__).with_name('pixel4xl_rescue_verify.py'))
+    run('python3', '-I', Path(__file__).with_name('verify-rescue-initramfs.py'))
     image = WORK / 'boot-matched.img'
     if not existing and image.exists():
         raise FileExistsError(f'Refusing to replace {image}')
