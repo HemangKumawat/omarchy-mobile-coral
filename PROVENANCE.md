@@ -12,9 +12,14 @@ tag `v6.17.0-sm8150` (`379d8fe35c7c`); earlier notes named the tag with this com
 was wrong.
 
 The three public commits on `sm8150/6.17` between tag `v6.17.0-sm8150` (`379d8fe35c7c`) and `6963e3800a8e` are:
-1. `ac44cb016300` — `power: supply: qcom_fg: silence unused variable warning`
-2. `a2b20090fc1c` — `power: supply: Add driver for IDT P9418 WPC Qi wireless power receiver`
+1. `53a8b55839d1` — `dts: qcom: sm8150: xiaomi-nabu: remove wakeup-source from lid gpio`
+2. `01fc3dd3c831` — `input: touchscreen: fts_touch: fix compilation with LLVM`
 3. `6963e3800a8e` — `power: supply: idtp9418: remove unused variable`
+
+(`v0.2.1` listed `ac44cb016300` and `a2b20090fc1c` here; those ids are not in the public tree, and
+the subjects given for them belong to commits before the tag. Checked against the GitLab API:
+`53a8b55839d1`'s parent is `379d8fe35c7c`, `01fc3dd3c831`'s parent is `53a8b55839d1`, and
+`6963e3800a8e`'s parent is `01fc3dd3c831`.)
 
 ## The installed boot image
 
