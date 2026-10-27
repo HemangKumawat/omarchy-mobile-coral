@@ -25,15 +25,20 @@ the subjects given for them belong to commits before the tag. Checked against th
 
 | Part | Source | Status |
 | --- | --- | --- |
-| Kernel `Image`: `6.17.0-sm8150 #30 SMP PREEMPT Mon Oct 19 21:29:48 CEST 2026`, GCC 16.1.0, binutils 2.47 | `6963e3800a8e` + [`kernel/series/coral-30`](kernel/series/coral-30) (patches `0001`..`0007`), config [`coral-30/config`](kernel/series/coral-30/config) | **Proven.** The build output equals the installed `Image` except byte 10, the `text_offset` field that `tools/pack-bootimg.py` sets to `0x80000`. The build tree was clean, and no source file was newer than the build. Applying the series to `6963e3800a8e` gives the build tree exactly (git tree `21eb1828b205f86d87333e77179e03a8f5b930b3`). |
-| DTB: 12 entries, one per factory `dtbo` board selector | [`kernel/dts/`](kernel/dts) compiled against `6963e3800a8e` + `coral-30` + [`kernel/series/coral-fec40357`](kernel/series/coral-fec40357) (patches `0008`..`0011`: SLPI, audio, cameras, DSI clocks) | **Proven.** Applying `coral-fec40357` on top of `coral-30` gives git tree `6d4115553ae5a9aec7b9e4ae23f77b2e4c4d7c4e` exactly, and `tools/build-kernel.sh <src> <out> --with-fec40357` reproduces all 12 installed DTB entries byte-for-byte (`sha256: 3efe241aa349ff260ef0312e1b0a3a611943f71b0939261729c42e3842c90058`). |
+| Kernel `Image`: `6.17.0-sm8150 #30 SMP PREEMPT Mon Oct 19 21:29:48 CEST 2026`, GCC 16.1.0, binutils 2.47 | `6963e3800a8e` + [`kernel/series/coral-30`](kernel/series/coral-30) (patches `0001`..`0007`) + [`kernel/series/coral-fec40357`](kernel/series/coral-fec40357) (patches `0008`..`0011`), config [`coral-30/config`](kernel/series/coral-30/config) (identical to `coral-fec40357/config` and to the build directory's `.config`) | **Proven** for the build output: it equals the installed `Image` except byte 10, the `text_offset` field that `tools/pack-bootimg.py` sets to `0x80000`. The build directory compiled a worktree whose content equals git tree `6d4115553ae5a9aec7b9e4ae23f77b2e4c4d7c4e` (patch `0011` was committed 27 minutes after the build). The installed `Image` contains strings from `0010`. `coral-30` alone (tree `21eb1828b205`) does not give this `Image`, because `0010` (`max77826-regulator.c`) and `0011` (`dsi_host.c`) change built-in drivers. `v0.2.2` and earlier said `coral-30` alone; that was wrong. |
+| DTB: 12 entries, one per factory `dtbo` board selector | [`kernel/dts/`](kernel/dts) compiled against `6963e3800a8e` + `coral-30` + [`kernel/series/coral-fec40357`](kernel/series/coral-fec40357) (patches `0008`..`0011`: SLPI, audio, cameras, DSI clocks) | **Proven.** Applying `coral-fec40357` on top of `coral-30` gives git tree `6d4115553ae5a9aec7b9e4ae23f77b2e4c4d7c4e` exactly, and `tools/build-kernel.sh` reproduces all 12 installed DTB entries byte-for-byte with `dtc` 1.8.1 (`sha256: 3efe241aa349ff260ef0312e1b0a3a611943f71b0939261729c42e3842c90058`). |
 | Loadable modules (cameras, audio, SLPI) | Built from the `coral-fec40357` tree (`6d4115553ae5`) | **Partly checked.** The staged `imx363.ko` and `fastrpc.ko` equal the debug-stripped build outputs. The staged `qcom-camss.ko` does not; it comes from a camera experiment variant. A full per-module manifest is still to do. |
-| `initramfs/init` | This repository | Equal to the installed init, except the SPDX line and the USB serial number, which is a parameter here. |
+| Loadable `coral-cs40l2x.ko` | Out-of-tree build of the Cirrus Logic `cs40l2x` driver (GPL-2.0; source commit not recorded) + [`kernel/patches/coral-cs40l2x-port.patch`](kernel/patches/coral-cs40l2x-port.patch) | **Not checked.** The base driver files are not published here. |
+| Installed ramdisk | `tools/pack-bootimg.py` output (`boot-omarchy.img`, 21 Oct) with a second, uncompressed cpio appended by hand on 22 Oct | **Not reproducible from this repository.** The appended cpio replaces `/init` with `initramfs/init` and adds private network files (a Wi-Fi profile, Tailscale state, a userspace-mode Tailscale unit and an `sshd` on `127.0.0.1`) that are not published. `pack-bootimg.py` still embeds the older init (300 s lease, USB-configured check) and does not take `initramfs/init` as input. |
+| `initramfs/init` | This repository | Equal to the installed init, except the SPDX line, the USB serial number (a parameter here) and one comment line. |
 | `initramfs/omarchy-userspace.sh` | This repository | Equal to the installed script, except the user name, which is a parameter here (`OMARCHY_INSTALL_USER`). |
+| `/usr/local/bin/coral-phone` | Prebuilt by `tools/build-rootfs.py` from a binary; the Rust source is not published yet | **Not checked.** |
 
 A byte-exact rebuild of the `Image` from this repository has not been demonstrated yet. The build
-host's compiler has since moved to GCC 16.2. `tools/build-kernel.sh` sets the banner timestamp and
-version values used by `#30` and reproduces the 12-entry `dtb-12` byte-for-byte.
+host's compiler has since moved to GCC 16.2. `tools/build-kernel.sh` applies both series, sets the
+banner timestamp and version used by `#30`, and reproduces the 12-entry `dtb-12` byte-for-byte. Its
+default banner user and host (`builder@localhost`) differ from the installed banner, so a byte-exact
+`Image` also needs `KBUILD_BUILD_USER`/`KBUILD_BUILD_HOST` set to the original values and GCC 16.1.0.
 
 ## Patch-to-commit mapping (`kernel/series/` and `kernel/patches/series`)
 
@@ -55,7 +60,17 @@ version values used by `#30` and reproduces the 12-entry `dtb-12` byte-for-byte.
 
 | Build | Date | Tree | Status |
 | --- | --- | --- | --- |
-| `#3` | 18 Oct 00:34 | `5a951e9017ef` (`0001`..`0002`) with uncommitted local display/touch/PON changes later committed in `472bb39eac2a` (`0005`) | First rescue kernel (`out-rescue-safe`). Not on the phone any more. Its working tree changed after the build, so its exact source is not byte-proven. |
-| `#25` | 19 Oct 06:07 | audio and SLPI experiment trees (`65adbcf4ac89`..`52f2c29b0a60`, `0001`..`0009`) | Booted from RAM only (`out-audio-20261019`). Its working tree changed after the build, so its exact source is not byte-proven. Superseded by the series above. |
-| `#27` | 19 Oct 12:31 | camera experiment trees (`d3dd05299ff8`..`fec403571c23`, `0001`..`0011`) | Booted from RAM only (`out-cameras-20261019`). Same caveat. Superseded by the series above. |
+| `#3` | 18 Oct 00:34 | `5a951e9017ef` (`0001`..`0002`) plus uncommitted changes, committed later (19 Oct 02:08) as `472bb39eac2a` (`0005`) | First rescue kernel (`out-rescue-safe`). Not on the phone any more. Its working tree changed after the build, so its exact source is not byte-proven. |
+| `#25` | 19 Oct 06:07 | uncommitted tree before `65adbcf4ac89` (`0007`, committed 06:18); the SLPI and audio work was committed later as `f1613a5f4fd4` and `52f2c29b0a60` | Installed in `boot_a` on 19 Oct and the kernel for the SLPI and audio sessions, whose modules and DTB came from the `0008`/`0009` trees. Not byte-proven. Replaced. |
+| `#27` | 19 Oct 12:30 | uncommitted tree on `52f2c29b0a60`; the camera work was committed later as `d3dd05299ff8` (14:59) | Installed in `boot_a` on 19 Oct; replaced by `#30`. Not byte-proven. |
+
+## Changes in `v0.2.3`
+
+- The `Image` row above: `#30` was built from both series, not `coral-30` alone.
+- `tools/build-kernel.sh` applies both series before building, and drops `--with-fec40357`.
+- Added `userspace/audio/audio-firmware.sha256` (names and hashes only), which `tools/build-rootfs.py`
+  already required.
+- Rows for the installed ramdisk, `coral-cs40l2x.ko` and `coral-phone`; corrected the earlier-kernel
+  table; copyright lines in `kernel/dts/`; the `tqftpserv` base commit (`128cd6e0a397`); CDC ECM, not
+  NCM.
 

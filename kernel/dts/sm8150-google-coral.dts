@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 /*
+ * Copyright (c) 2025, andrewgigena <mail@andrewgigena.dev>
+ *
  * Google Pixel 4 XL (coral). Derived from sm8150-google-flame.dts.
  *
  * Stock coral-tp1a.221005.002.b2 evidence:

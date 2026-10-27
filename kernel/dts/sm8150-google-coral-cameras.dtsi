@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Coral camera wiring from Google's sm8150-coral-camera-sensor.dtsi. */
+/*
+ * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ *
+ * Coral camera wiring from Google's sm8150-coral-camera-sensor.dtsi.
+ */
 
 &max77826 {
 	/* The GPIO mux must be applied before the PMIC's first register read. */
