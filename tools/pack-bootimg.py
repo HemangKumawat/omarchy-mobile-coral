@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Derive a bounded, read-only Omarchy boot from the USB-proven rescue image."""
 import argparse
 import gzip
@@ -14,7 +15,7 @@ import struct
 import subprocess
 import tempfile
 
-WORK = Path('/var/tmp/pixel4xl/ramtest/rescue-safe')
+WORK = Path(os.environ.get('CORAL_WORK', 'work')) / 'ramtest/rescue-safe'
 RELEASE = '6.17.0-sm8150'
 RADIO_MODULES = {
     'algif_hash', 'algif_skcipher', 'ath', 'ath10k_core', 'ath10k_snoc',

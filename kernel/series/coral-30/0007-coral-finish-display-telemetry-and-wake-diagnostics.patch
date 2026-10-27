@@ -1,0 +1,725 @@
+From 65adbcf4ac89 Mon Sep 17 00:00:00 2001
+From: Hemang Kumawat <HemangKumawat@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 06:18:34 +0200
+Subject: [PATCH 7] coral: finish display, telemetry and wake diagnostics
+
+Use the stock command-mode lane rate and required pixel clock parent. Preserve raw DSI faults while exposing the optional panel power-mode read through a serialized read-only attribute. Complete board reference-clock and wake wiring, temperature recovery and IIO read handling, and focused UART wake diagnostics.
+
+Source commit: 65adbcf4ac89 (diff against 6315c883538b).
+Assisted-by: AI agents (Codex, Claude) under the author's direction
+---
+ arch/arm64/boot/dts/qcom/sm8150-google-coral.dts | 37 +++++++++-
+ drivers/clk/qcom/dispcc-sm8250.c                 | 38 ++++++----
+ drivers/gpu/drm/msm/dsi/dsi_host.c               | 61 ++++++++++++++--
+ drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c    | 88 +++++++++++++++++++-----
+ drivers/pinctrl/qcom/pinctrl-msm.c               | 29 ++++++++
+ drivers/pinctrl/qcom/pinctrl-msm.h               |  1 +
+ drivers/pinctrl/qcom/pinctrl-sm8150.c            | 11 +++
+ drivers/power/supply/qcom_fg_gen4_temp.h         | 35 +++++++++-
+ drivers/power/supply/qcom_smbx.c                 | 10 +--
+ drivers/tty/serial/qcom_geni_serial.c            | 14 +++-
+ 10 files changed, 277 insertions(+), 47 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+index f6a7a1812dad249bce31adde4621ace9b0078f5b..36f4670bc700ee04ff8166ac51a58fe2b574af27 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+@@ -141,7 +141,7 @@ haptics@43 {
+ 		interrupt-parent = <&tlmm>;
+ 		interrupts = <129 IRQ_TYPE_LEVEL_LOW>;
+ 		pinctrl-names = "default";
+-		pinctrl-0 = <&coral_haptic_pins>;
++		pinctrl-0 = <&coral_haptic_pins &coral_haptic_clk>;
+ 		cirrus,boost-ind-nanohenry = <1000>;
+ 		cirrus,boost-cap-microfarad = <4>;
+ 		cirrus,boost-ipk-milliamp = <4500>;
+@@ -150,7 +150,7 @@ haptics@43 {
+ 		cirrus,f0-default = <0x265c50>;
+ 		cirrus,f0-min = <0x230000>;
+ 		cirrus,f0-max = <0x294000>;
+-		cirrus,redc-comp-disable = <1>;
++		cirrus,redc-comp-disable;
+ 		cirrus,redc-default = <0x50030>;
+ 		cirrus,redc-min = <0x49c20>;
+ 		cirrus,redc-max = <0x5a260>;
+@@ -159,7 +159,7 @@ haptics@43 {
+ 		cirrus,gpio1-fall-timeout = <0xb8ae>;
+ 		cirrus,gpio1-mode = <2>;
+ 		cirrus,hiber-enable;
+-		cirrus,refclk-gpio2 = <1>;
++		cirrus,refclk-gpio2;
+ 		cirrus,asp-bclk-freq-hz = <6144000>;
+ 		cirrus,asp-bclk-inv;
+ 		cirrus,asp-fmt = <0>;
+@@ -176,6 +176,7 @@ reset-pins {
+ 			function = "gpio";
+ 			drive-strength = <2>;
+ 			bias-disable;
++			output-low;
+ 		};
+ 		irq-pins {
+ 			pins = "gpio129";
+@@ -185,6 +186,18 @@ irq-pins {
+ 	};
+ };
+ 
++/* Stock sm8150-floral-haptics.dtsi: 32 kHz REFCLK on PM8150 GPIO3. */
++&pm8150_gpios {
++	coral_haptic_clk: coral-haptic-clk-state {
++		pins = "gpio3";
++		function = "func1";
++		bias-disable;
++		power-source = <0>;
++		output-low;
++		input-disable;
++	};
++};
++
+ /* Internal VBAT mux: binding and adc5_chans_pmic both define 1/3 scaling.
+  * This is independent voltage evidence, not a replacement battery gauge.
+  * Stock battery thermistor is on FG-gen4, not a board/charger thermistor.
+@@ -196,3 +209,21 @@ channel@84 {
+ 		label = "vbat_sns";
+ 	};
+ };
++
++/* RX must stay idle-high when the Bluetooth controller tri-states TX.
++ * A floating GPIO46 can fabricate a falling-edge system wake at pinmux sleep.
++ */
++&qup_uart13_sleep {
++	pinconf-rx {
++		/delete-property/ bias-disable;
++		bias-pull-up;
++	};
++};
++
++/* PMIC alarms and PON keys must wake through the always-on PDC.
++ * SM8150 PDC port 1 maps to the same physical GIC SPI 481.
++ */
++&spmi_bus {
++	/delete-property/ interrupts;
++	interrupts-extended = <&pdc 1 IRQ_TYPE_LEVEL_HIGH>;
++};
+diff --git a/drivers/clk/qcom/dispcc-sm8250.c b/drivers/clk/qcom/dispcc-sm8250.c
+index 8f433e1e702839daf62c0a65992bc89927cac266..e9630b721bfc3259d9290de8c3ea7a0181d54000 100644
+--- a/drivers/clk/qcom/dispcc-sm8250.c
++++ b/drivers/clk/qcom/dispcc-sm8250.c
+@@ -569,18 +569,28 @@ static struct clk_rcg2 disp_cc_mdss_mdp_clk_src = {
+ 	},
+ };
+ 
++static struct clk_init_data disp_cc_mdss_pclk0_init = {
++	.name = "disp_cc_mdss_pclk0_clk_src",
++	.parent_data = disp_cc_parent_data_6,
++	.num_parents = ARRAY_SIZE(disp_cc_parent_data_6),
++	.flags = CLK_SET_RATE_PARENT,
++	.ops = &clk_pixel_ops,
++};
++
+ static struct clk_rcg2 disp_cc_mdss_pclk0_clk_src = {
+ 	.cmd_rcgr = 0x2098,
+ 	.mnd_width = 8,
+ 	.hid_width = 5,
+ 	.parent_map = disp_cc_parent_map_6,
+-	.clkr.hw.init = &(const struct clk_init_data) {
+-		.name = "disp_cc_mdss_pclk0_clk_src",
+-		.parent_data = disp_cc_parent_data_6,
+-		.num_parents = ARRAY_SIZE(disp_cc_parent_data_6),
+-		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_pixel_ops,
+-	},
++	.clkr.hw.init = &disp_cc_mdss_pclk0_init,
++};
++
++static struct clk_init_data disp_cc_mdss_pclk1_init = {
++	.name = "disp_cc_mdss_pclk1_clk_src",
++	.parent_data = disp_cc_parent_data_6,
++	.num_parents = ARRAY_SIZE(disp_cc_parent_data_6),
++	.flags = CLK_SET_RATE_PARENT,
++	.ops = &clk_pixel_ops,
+ };
+ 
+ static struct clk_rcg2 disp_cc_mdss_pclk1_clk_src = {
+@@ -588,13 +598,7 @@ static struct clk_rcg2 disp_cc_mdss_pclk1_clk_src = {
+ 	.mnd_width = 8,
+ 	.hid_width = 5,
+ 	.parent_map = disp_cc_parent_map_6,
+-	.clkr.hw.init = &(const struct clk_init_data) {
+-		.name = "disp_cc_mdss_pclk1_clk_src",
+-		.parent_data = disp_cc_parent_data_6,
+-		.num_parents = ARRAY_SIZE(disp_cc_parent_data_6),
+-		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_pixel_ops,
+-	},
++	.clkr.hw.init = &disp_cc_mdss_pclk1_init,
+ };
+ 
+ static const struct freq_tbl ftbl_disp_cc_mdss_rot_clk_src[] = {
+@@ -1271,6 +1275,12 @@ static int disp_cc_sm8250_probe(struct platform_device *pdev)
+ 		return PTR_ERR(regmap);
+ 	}
+ 
++	/* Initial pixel RCG updates need an enabled DSI PLL parent on SM8150. */
++	if (of_device_is_compatible(pdev->dev.of_node, "qcom,sm8150-dispcc")) {
++		disp_cc_mdss_pclk0_init.flags |= CLK_OPS_PARENT_ENABLE;
++		disp_cc_mdss_pclk1_init.flags |= CLK_OPS_PARENT_ENABLE;
++	}
++
+ 	/* Apply differences for SM8150 and SM8350 */
+ 	BUILD_BUG_ON(CLK_ALPHA_PLL_TYPE_TRION != CLK_ALPHA_PLL_TYPE_LUCID);
+ 	if (of_device_is_compatible(pdev->dev.of_node, "qcom,sc8180x-dispcc") ||
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index e0de545d40775fab1f4a7fc44c299fd27b7c6d32..0ee1ebf9c1e2dd9b7d7459ae0edb4b10536565f5 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -85,7 +85,7 @@ static int dsi_get_version(const void __iomem *base, u32 *major, u32 *minor)
+ 	}
+ }
+ 
+-#define DSI_ERR_STATE_ACK			0x0000
++#define DSI_ERR_STATE_ACK			0x0040
+ #define DSI_ERR_STATE_TIMEOUT			0x0001
+ #define DSI_ERR_STATE_DLN0_PHY			0x0002
+ #define DSI_ERR_STATE_FIFO			0x0004
+@@ -129,6 +129,7 @@ struct msm_dsi_host {
+ 	struct clk *dsi_pll_pixel_clk;
+ 
+ 	unsigned long byte_clk_rate;
++	unsigned long hs_rate;
+ 	unsigned long byte_intf_clk_rate;
+ 	unsigned long pixel_clk_rate;
+ 	unsigned long esc_clk_rate;
+@@ -147,6 +148,8 @@ struct msm_dsi_host {
+ 	spinlock_t intr_lock; /* Protect interrupt ctrl register */
+ 
+ 	u32 err_work_state;
++	/* Last prepared DMA packet: type, data0, data1, low 8 flag bits. */
++	u32 last_cmd;
+ 	struct work_struct err_work;
+ 	struct workqueue_struct *workqueue;
+ 
+@@ -595,11 +598,18 @@ static unsigned long dsi_adjust_pclk_for_compression(const struct drm_display_mo
+ 	return mult_frac(mode->clock * 1000u, new_htotal, mode->htotal);
+ }
+ 
+-static unsigned long dsi_get_pclk_rate(const struct drm_display_mode *mode,
++static unsigned long dsi_get_pclk_rate(struct msm_dsi_host *msm_host,
++		const struct drm_display_mode *mode,
+ 		const struct drm_dsc_config *dsc, bool is_bonded_dsi)
+ {
+ 	unsigned long pclk_rate;
+ 
++	/* Command panels may use one fixed lane rate at different TE rates. */
++	if (msm_host->hs_rate && !msm_host->cphy_mode &&
++	    !(msm_host->mode_flags & MIPI_DSI_MODE_VIDEO))
++		return mult_frac(msm_host->hs_rate, msm_host->lanes,
++				 mipi_dsi_pixel_format_to_bpp(msm_host->format));
++
+ 	pclk_rate = mode->clock * 1000u;
+ 
+ 	if (dsc)
+@@ -623,7 +633,8 @@ unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_d
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 	u8 lanes = msm_host->lanes;
+ 	u32 bpp = mipi_dsi_pixel_format_to_bpp(msm_host->format);
+-	unsigned long pclk_rate = dsi_get_pclk_rate(mode, msm_host->dsc, is_bonded_dsi);
++	unsigned long pclk_rate = dsi_get_pclk_rate(msm_host, mode, msm_host->dsc,
++						 is_bonded_dsi);
+ 	unsigned long pclk_bpp;
+ 
+ 	if (lanes == 0) {
+@@ -642,7 +653,8 @@ unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_d
+ 
+ static void dsi_calc_pclk(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
+ {
+-	msm_host->pixel_clk_rate = dsi_get_pclk_rate(msm_host->mode, msm_host->dsc, is_bonded_dsi);
++	msm_host->pixel_clk_rate = dsi_get_pclk_rate(msm_host, msm_host->mode,
++						 msm_host->dsc, is_bonded_dsi);
+ 	msm_host->byte_clk_rate = dsi_byte_clk_get_rate(&msm_host->base, is_bonded_dsi,
+ 							msm_host->mode);
+ 
+@@ -1487,6 +1499,8 @@ static int dsi_cmds2buf_tx(struct msm_dsi_host *msm_host,
+ 				const struct mipi_dsi_msg *msg)
+ {
+ 	int len, ret;
++	u32 command;
++	const u8 *payload = msg->tx_buf;
+ 	int bllp_len = msm_host->mode->hdisplay *
+ 			mipi_dsi_pixel_format_to_bpp(msm_host->format) / 8;
+ 
+@@ -1513,6 +1527,13 @@ static int dsi_cmds2buf_tx(struct msm_dsi_host *msm_host,
+ 		return -EINVAL;
+ 	}
+ 
++	command = msg->type | ((u32)(msg->flags & 0xff) << 24);
++	if (payload && msg->tx_len)
++		command |= (u32)payload[0] << 8;
++	if (payload && msg->tx_len > 1)
++		command |= (u32)payload[1] << 16;
++	WRITE_ONCE(msm_host->last_cmd, command);
++
+ 	ret = dsi_cmd_dma_tx(msm_host, len);
+ 	if (ret < 0) {
+ 		pr_err("%s: cmd dma tx failed, type=0x%x, data0=0x%x, len=%d, ret=%d\n",
+@@ -1592,6 +1613,21 @@ static void dsi_fifo_status(struct msm_dsi_host *msm_host)
+ 
+ 	status = dsi_read(msm_host, REG_DSI_FIFO_STATUS);
+ 
++	/* EMPTY, FULL and watermark bits are ordinary FIFO state, not faults. */
++	status &= DSI_FIFO_STATUS_VIDEO_MDP_FIFO_OVERFLOW |
++		  DSI_FIFO_STATUS_VIDEO_MDP_FIFO_UNDERFLOW |
++		  DSI_FIFO_STATUS_CMD_MDP_FIFO_UNDERFLOW |
++		  DSI_FIFO_STATUS_CMD_DMA_FIFO_UNDERFLOW |
++		  DSI_FIFO_STATUS_DLN0_LP_FIFO_OVERFLOW |
++		  DSI_FIFO_STATUS_DLN0_HS_FIFO_OVERFLOW |
++		  DSI_FIFO_STATUS_DLN0_HS_FIFO_UNDERFLOW |
++		  DSI_FIFO_STATUS_DLN1_HS_FIFO_OVERFLOW |
++		  DSI_FIFO_STATUS_DLN1_HS_FIFO_UNDERFLOW |
++		  DSI_FIFO_STATUS_DLN2_HS_FIFO_OVERFLOW |
++		  DSI_FIFO_STATUS_DLN2_HS_FIFO_UNDERFLOW |
++		  DSI_FIFO_STATUS_DLN3_HS_FIFO_OVERFLOW |
++		  DSI_FIFO_STATUS_DLN3_HS_FIFO_UNDERFLOW;
++
+ 	/* fifo underflow, overflow */
+ 	if (status) {
+ 		dsi_write(msm_host, REG_DSI_FIFO_STATUS, status);
+@@ -1629,9 +1665,22 @@ static void dsi_clk_status(struct msm_dsi_host *msm_host)
+ 
+ static void dsi_error(struct msm_dsi_host *msm_host)
+ {
++	u32 fifo_status, ack_status, command;
++	u32 readback_ctrl = 0, readback0 = 0, readback1 = 0;
++
+ 	/* disable dsi error interrupt */
+ 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_ERROR, 0);
+ 
++	/* Snapshot before the status handlers clear their W1C registers. */
++	fifo_status = dsi_read(msm_host, REG_DSI_FIFO_STATUS);
++	ack_status = dsi_read(msm_host, REG_DSI_ACK_ERR_STATUS);
++	command = READ_ONCE(msm_host->last_cmd);
++	if (ack_status) {
++		readback_ctrl = dsi_read(msm_host, REG_DSI_RDBK_DATA_CTRL);
++		readback0 = dsi_read(msm_host, REG_DSI_RDBK_DATA(0));
++		readback1 = dsi_read(msm_host, REG_DSI_RDBK_DATA(1));
++	}
++
+ 	dsi_clk_status(msm_host);
+ 	dsi_fifo_status(msm_host);
+ 	dsi_ack_err_status(msm_host);
+@@ -1639,6 +1688,9 @@ static void dsi_error(struct msm_dsi_host *msm_host)
+ 	dsi_status(msm_host);
+ 	dsi_dln0_phy_err(msm_host);
+ 
++	pr_err_ratelimited("dsi_irq_snapshot: id=%d fifo=%08x ack=%08x cmd=%08x rdbk=%08x/%08x/%08x\n",
++			   msm_host->id, fifo_status, ack_status, command,
++			   readback_ctrl, readback0, readback1);
+ 	queue_work(msm_host->workqueue, &msm_host->err_work);
+ }
+ 
+@@ -1683,6 +1735,7 @@ static int dsi_host_attach(struct mipi_dsi_host *host,
+ 	msm_host->lanes = dsi->lanes;
+ 	msm_host->format = dsi->format;
+ 	msm_host->mode_flags = dsi->mode_flags;
++	msm_host->hs_rate = dsi->hs_rate;
+ 	if (dsi->dsc)
+ 		msm_host->dsc = dsi->dsc;
+ 
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
+index 53456b139dc97796f85ff523e143a111e9c0677a..f2340261946cfde6247c83ff0c3b936ec321010e 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
+@@ -34,7 +34,7 @@ struct s6e3hc2 {
+ 	struct drm_connector *connector;
+ 	struct mutex lock;
+ 	unsigned int refresh_rate, lp_mode;
+-	bool powered, gamma_ready;
++	bool powered, gamma_ready, power_mode_available;
+ 	u8 gamma[2][3][181];
+ };
+ 
+@@ -67,13 +67,14 @@ static void s6e3hc2_reset(struct s6e3hc2 *ctx)
+ static int s6e3hc2_on(struct s6e3hc2 *ctx)
+ {
+ 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++	u8 ctrl[] = { MIPI_DCS_WRITE_CONTROL_DISPLAY,
++		      ctx->refresh_rate == 90 ? 0x30 : 0x20 };
+ 	int ret;
+ 
+ 	mipi_dsi_compression_mode_multi(&dsi_ctx, true);
+ 	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+ 	mipi_dsi_msleep(&dsi_ctx, 120);
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY,
+-				     0x20);
++	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, ctrl, sizeof(ctrl));
+ 	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf1, 0x5a, 0x5a);
+@@ -90,14 +91,11 @@ static int s6e3hc2_on(struct s6e3hc2 *ctx)
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfc, 0xa5, 0xa5);
+ 	if (dsi_ctx.accum_err)
+ 		return dsi_ctx.accum_err;
+-	if (ctx->refresh_rate == 90) {
+-		ret = s6e3hc2_gamma_read(ctx);
++	if (ctx->gamma_ready) {
++		ret = s6e3hc2_gamma_write(ctx);
+ 		if (ret)
+ 			return ret;
+ 	}
+-	ret = s6e3hc2_gamma_write(ctx);
+-	if (ret)
+-		return ret;
+ 	gpiod_set_value_cansleep(ctx->touch_rate_gpio, ctx->refresh_rate == 90);
+ 	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
+ 
+@@ -124,6 +122,7 @@ static int s6e3hc2_prepare(struct drm_panel *panel)
+ 	int ret;
+ 
+ 	guard(mutex)(&ctx->lock);
++	ctx->power_mode_available = false;
+ 	ctx->refresh_rate = 60;
+ 	if (ctx->connector && ctx->connector->state && ctx->connector->state->crtc)
+ 		ctx->refresh_rate = drm_mode_vrefresh(
+@@ -154,12 +153,6 @@ static int s6e3hc2_prepare(struct drm_panel *panel)
+ 		return ret;
+ 	}
+ 
+-	ret = mipi_dsi_compression_mode(ctx->dsi, true);
+-	if (ret < 0) {
+-		dev_err(dev, "failed to enable compression mode: %d\n", ret);
+-		return ret;
+-	}
+-
+ 	msleep(28); /* TODO: Is this panel-dependent? */
+ 	ctx->powered = true;
+ 	ctx->lp_mode = 0;
+@@ -170,15 +163,57 @@ static int s6e3hc2_prepare(struct drm_panel *panel)
+ static int s6e3hc2_enable(struct drm_panel *panel)
+ {
+ 	struct s6e3hc2 *ctx = to_s6e3hc2(panel);
+-	u8 mode = 0;
+ 	int ret;
+ 
++	guard(mutex)(&ctx->lock);
++	ctx->power_mode_available = false;
++	if (!ctx->powered)
++		return -EHOSTDOWN;
++	/* Read at 90 Hz after display-on; keep the 60 Hz bootstrap defaults. */
++	if (ctx->refresh_rate == 90 && !ctx->gamma_ready) {
++		ret = s6e3hc2_gamma_read(ctx);
++		if (ret) {
++			dev_err(panel->dev, "Failed to read panel calibration: %d\n", ret);
++			return ret;
++		}
++	}
++	if (ctx->gamma_ready) {
++		ret = s6e3hc2_gamma_write(ctx);
++		if (ret) {
++			dev_err(panel->dev, "Failed to apply panel calibration: %d\n", ret);
++			return ret;
++		}
++	}
++	ctx->power_mode_available = true;
++	return 0;
++}
++
++static ssize_t power_mode_show(struct device *dev,
++			       struct device_attribute *attr, char *buf)
++{
++	struct s6e3hc2 *ctx = dev_get_drvdata(dev);
++	u8 mode;
++	int ret;
++
++	guard(mutex)(&ctx->lock);
++	if (!ctx->powered || !ctx->power_mode_available)
++		return -EHOSTDOWN;
+ 	ret = mipi_dsi_dcs_get_power_mode(ctx->dsi, &mode);
+ 	if (ret < 0) {
+-		dev_err(panel->dev, "DCS power mode read failed: %d\n", ret);
++		dev_err(dev, "DCS power mode read failed: %d\n", ret);
+ 		return ret;
+ 	}
+-	dev_info(panel->dev, "coral DCS power mode: 0x%02x\n", mode);
++	dev_info(dev, "coral DCS power mode: 0x%02x\n", mode);
++	return sysfs_emit(buf, "0x%02x\n", mode);
++}
++static DEVICE_ATTR_RO(power_mode);
++
++static int s6e3hc2_disable(struct drm_panel *panel)
++{
++	struct s6e3hc2 *ctx = to_s6e3hc2(panel);
++
++	guard(mutex)(&ctx->lock);
++	ctx->power_mode_available = false;
+ 	return 0;
+ }
+ 
+@@ -189,6 +224,7 @@ static int s6e3hc2_unprepare(struct drm_panel *panel)
+ 	int ret;
+ 
+ 	guard(mutex)(&ctx->lock);
++	ctx->power_mode_available = false;
+ 	ctx->powered = false;
+ 	ctx->lp_mode = 0;
+ 	ret = s6e3hc2_off(ctx);
+@@ -228,7 +264,8 @@ static int s6e3hc2_get_modes(struct drm_panel *panel,
+ 		if (!mode)
+ 			return -ENOMEM;
+ 		mode->clock = 1540 * 3072 * rate / 1000;
+-		mode->type |= rate == 90 ? DRM_MODE_TYPE_PREFERRED : 0;
++		/* Keep the firmware splash rate for the initial fbdev modeset. */
++		mode->type |= rate == 60 ? DRM_MODE_TYPE_PREFERRED : 0;
+ 		drm_mode_set_name(mode);
+ 		drm_mode_probed_add(connector, mode);
+ 	}
+@@ -242,6 +279,7 @@ static int s6e3hc2_get_modes(struct drm_panel *panel,
+ static const struct drm_panel_funcs s6e3hc2_panel_funcs = {
+ 	.prepare = s6e3hc2_prepare,
+ 	.enable = s6e3hc2_enable,
++	.disable = s6e3hc2_disable,
+ 	.unprepare = s6e3hc2_unprepare,
+ 	.get_modes = s6e3hc2_get_modes,
+ };
+@@ -338,6 +376,8 @@ static int s6e3hc2_probe(struct mipi_dsi_device *dsi)
+ 	mipi_dsi_set_drvdata(dsi, ctx);
+ 
+ 	dsi->lanes = 4;
++	/* Stock timing@0 and timing@1 use the same per-lane bit clock. */
++	dsi->hs_rate = 962150400;
+ 	dsi->format = MIPI_DSI_FMT_RGB888;
+ 	dsi->mode_flags = MIPI_DSI_MODE_NO_EOT_PACKET |
+ 			  MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM;
+@@ -384,6 +424,13 @@ static int s6e3hc2_probe(struct mipi_dsi_device *dsi)
+ 		return dev_err_probe(dev, ret, "Failed to attach to DSI host\n");
+ 	}
+ 
++	ret = device_create_file(dev, &dev_attr_power_mode);
++	if (ret) {
++		mipi_dsi_detach(dsi);
++		drm_panel_remove(&ctx->panel);
++		return ret;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -392,6 +439,11 @@ static void s6e3hc2_remove(struct mipi_dsi_device *dsi)
+ 	struct s6e3hc2 *ctx = mipi_dsi_get_drvdata(dsi);
+ 	int ret;
+ 
++	/* Drain active sysfs reads before detaching their transport. */
++	device_remove_file(&dsi->dev, &dev_attr_power_mode);
++	mutex_lock(&ctx->lock);
++	ctx->power_mode_available = false;
++	mutex_unlock(&ctx->lock);
+ 	ret = mipi_dsi_detach(dsi);
+ 	if (ret < 0)
+ 		dev_err(&dsi->dev, "Failed to detach from DSI host: %d\n", ret);
+diff --git a/drivers/pinctrl/qcom/pinctrl-msm.c b/drivers/pinctrl/qcom/pinctrl-msm.c
+index 83eb075b6bfa1728137e47741740fda78046514b..637b0575a31d0e6a02eb58d07a0b41d3635aab2d 100644
+--- a/drivers/pinctrl/qcom/pinctrl-msm.c
++++ b/drivers/pinctrl/qcom/pinctrl-msm.c
+@@ -1530,6 +1530,35 @@ static void msm_pinctrl_setup_pm_reset(struct msm_pinctrl *pctrl)
+ 		}
+ }
+ 
++/* Read GPIO46 after all normal device suspend callbacks, before noirq. */
++void msm_pinctrl_coral_uart_snapshot(struct device *dev)
++{
++	struct msm_pinctrl *pctrl = dev_get_drvdata(dev);
++	const struct msm_pingroup *g;
++	unsigned long flags;
++	u32 ctl, io, cfg, status;
++
++	if (!of_machine_is_compatible("google,coral") ||
++	    pctrl->soc->ngroups <= 46)
++		return;
++
++	g = &pctrl->soc->groups[46];
++	raw_spin_lock_irqsave(&pctrl->lock, flags);
++	ctl = msm_readl_ctl(pctrl, g);
++	io = msm_readl_io(pctrl, g);
++	cfg = msm_readl_intr_cfg(pctrl, g);
++	status = msm_readl_intr_status(pctrl, g);
++	raw_spin_unlock_irqrestore(&pctrl->lock, flags);
++
++	dev_info(dev,
++		 "coral-uart suspend-late gpio46 ctl=%08x io=%08x intr_cfg=%08x intr_status=%08x mux=%u pull=%u input=%u oe=%u\n",
++		 ctl, io, cfg, status,
++		 (ctl >> g->mux_bit) & ((1U << order_base_2(g->nfuncs)) - 1),
++		 (ctl >> g->pull_bit) & 3, (io >> g->in_bit) & 1,
++		 (ctl >> g->oe_bit) & 1);
++}
++EXPORT_SYMBOL_GPL(msm_pinctrl_coral_uart_snapshot);
++
+ static __maybe_unused int msm_pinctrl_suspend(struct device *dev)
+ {
+ 	struct msm_pinctrl *pctrl = dev_get_drvdata(dev);
+diff --git a/drivers/pinctrl/qcom/pinctrl-msm.h b/drivers/pinctrl/qcom/pinctrl-msm.h
+index d7dc0947bb161868c8f433dc2536719b8afc8bd8..335da8ee65ad6d2b616e324f1f91aa5661269464 100644
+--- a/drivers/pinctrl/qcom/pinctrl-msm.h
++++ b/drivers/pinctrl/qcom/pinctrl-msm.h
+@@ -168,6 +168,7 @@ struct msm_pinctrl_soc_data {
+ };
+ 
+ extern const struct dev_pm_ops msm_pinctrl_dev_pm_ops;
++void msm_pinctrl_coral_uart_snapshot(struct device *dev);
+ 
+ int msm_pinctrl_probe(struct platform_device *pdev,
+ 		      const struct msm_pinctrl_soc_data *soc_data);
+diff --git a/drivers/pinctrl/qcom/pinctrl-sm8150.c b/drivers/pinctrl/qcom/pinctrl-sm8150.c
+index 794ed99463f76032f56be9464a4aa3018537df94..3f10756083e06ab1402b9a158fbe2c549fa34366 100644
+--- a/drivers/pinctrl/qcom/pinctrl-sm8150.c
++++ b/drivers/pinctrl/qcom/pinctrl-sm8150.c
+@@ -1531,6 +1531,16 @@ static int sm8150_pinctrl_probe(struct platform_device *pdev)
+ 	return msm_pinctrl_probe(pdev, &sm8150_pinctrl);
+ }
+ 
++static int sm8150_pinctrl_suspend_late(struct device *dev)
++{
++	msm_pinctrl_coral_uart_snapshot(dev);
++	return 0;
++}
++
++static const struct dev_pm_ops sm8150_pinctrl_pm_ops = {
++	.suspend_late = sm8150_pinctrl_suspend_late,
++};
++
+ static const struct of_device_id sm8150_pinctrl_of_match[] = {
+ 	{ .compatible = "qcom,sm8150-pinctrl", },
+ 	{ },
+@@ -1540,6 +1550,7 @@ static struct platform_driver sm8150_pinctrl_driver = {
+ 	.driver = {
+ 		.name = "sm8150-pinctrl",
+ 		.of_match_table = sm8150_pinctrl_of_match,
++		.pm = &sm8150_pinctrl_pm_ops,
+ 	},
+ 	.probe = sm8150_pinctrl_probe,
+ };
+diff --git a/drivers/power/supply/qcom_fg_gen4_temp.h b/drivers/power/supply/qcom_fg_gen4_temp.h
+index 951e87ba6552e7ee395d210ec580cb028f8d4ad8..f7445e24e4a15d440458e6ec6ab290ad2b11c855 100644
+--- a/drivers/power/supply/qcom_fg_gen4_temp.h
++++ b/drivers/power/supply/qcom_fg_gen4_temp.h
+@@ -35,10 +35,36 @@ static int qcom_fg_gen4_release_dma(struct qcom_fg_chip *chip)
+ 	ret = qcom_fg_masked_write(chip, MEM_INTF_CFG(chip), BIT(7) | BIT(5), 0);
+ 	release = qcom_fg_masked_write(chip, GEN4_MEM_ARB_CFG(chip), BIT(0), 0);
+ 	if (ret || release)
+-		dev_err(chip->dev, "Gen4 DMA release failed: %d/%d\n", ret, release);
++		dev_err_ratelimited(chip->dev, "Gen4 DMA release failed: %d/%d\n", ret, release);
+ 	return ret ?: release;
+ }
+ 
++static int qcom_fg_gen4_clear_dma_errors(struct qcom_fg_chip *chip)
++{
++	u8 status;
++	int ret;
++
++	/* Stock fg_clear_dma_errors_if_any(): DMA_CTL[0] clears sticky logs.
++	 * Deassert before the new transaction so its errors remain observable.
++	 */
++	ret = qcom_fg_read(chip, &status, MEM_IF_DMA_STS(chip), 1);
++	if (ret)
++		return ret;
++	if (status & (BIT(1) | BIT(2))) {
++		dev_warn_ratelimited(chip->dev, "Clearing previous Gen4 DMA errors: %#x\n", status);
++		ret = qcom_fg_masked_write(chip, MEM_IF_DMA_CTL(chip), BIT(0), BIT(0));
++		if (ret)
++			return ret;
++	}
++	ret = qcom_fg_masked_write(chip, MEM_IF_DMA_CTL(chip), BIT(0), 0);
++	if (ret)
++		return ret;
++	ret = qcom_fg_read(chip, &status, MEM_IF_DMA_STS(chip), 1);
++	if (!ret && (status & (BIT(1) | BIT(2))))
++		ret = -EIO;
++	return ret;
++}
++
+ static int qcom_fg_gen4_get_temperature(struct qcom_fg_chip *chip, int *val)
+ {
+ 	u8 data[2], status;
+@@ -56,6 +82,11 @@ static int qcom_fg_gen4_get_temperature(struct qcom_fg_chip *chip, int *val)
+ 		return ret;
+ 	if (status & BIT(0))
+ 		return -EBUSY;
++	ret = qcom_fg_gen4_clear_dma_errors(chip);
++	if (ret) {
++		dev_err_ratelimited(chip->dev, "Gen4 DMA error recovery failed: %d\n", ret);
++		return ret;
++	}
+ 
+ 	/* Stock PM8150B-v1 DMA workaround, conservatively used on both revisions.
+ 	 * ALG_ACTIVE may need320ms during ESR pulses; stock polls35x10ms.
+@@ -102,7 +133,7 @@ static int qcom_fg_gen4_get_temperature(struct qcom_fg_chip *chip, int *val)
+ 	if (!ret)
+ 		ret = release;
+ 	if (ret) {
+-		dev_err(chip->dev, "Gen4 SRAM temperature read failed: %d\n", ret);
++		dev_err_ratelimited(chip->dev, "Gen4 SRAM temperature read failed: %d\n", ret);
+ 		return ret;
+ 	}
+ 	/* Signed10-bit two's-complement, 0.25C/LSB -> deci degrees C. */
+diff --git a/drivers/power/supply/qcom_smbx.c b/drivers/power/supply/qcom_smbx.c
+index 6ada5ef6c263a85234f988e8396a5499e013ccdf..4881011082b6b1437300c7812c255d68951a80ec 100644
+--- a/drivers/power/supply/qcom_smbx.c
++++ b/drivers/power/supply/qcom_smbx.c
+@@ -497,12 +497,15 @@ static void smb_status_change_work(struct work_struct *work)
+ static int smb_get_iio_chan(struct smb_chip *chip, struct iio_channel *chan,
+ 			     int *val)
+ {
++	int ret;
++
+ 	if (IS_ERR(chan)) {
+ 		dev_err(chip->dev, "Failed to chan, err = %li", PTR_ERR(chan));
+ 		return PTR_ERR(chan);
+ 	}
+ 
+-	return iio_read_channel_processed(chan, val);
++	ret = iio_read_channel_processed(chan, val);
++	return ret < 0 ? ret : 0;
+ }
+ 
+ static int smb5_get_prop_health(struct smb_chip *chip, int *val)
+@@ -670,10 +673,7 @@ static int smb_get_property(struct power_supply *psy,
+ 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+ 		ret = smb_get_iio_chan(chip, chip->usb_in_v_chan,
+ 					 &val->intval);
+-		if (!ret) {
+-			if (chip->gen == SMB5)
+-				val->intval *= 16;
+-		}
++		/* ADC5 processed values already include the channel prescale. */
+ 		return ret;
+ 	case POWER_SUPPLY_PROP_ONLINE:
+ 		return smb_get_prop_usb_online(chip, &val->intval);
+diff --git a/drivers/tty/serial/qcom_geni_serial.c b/drivers/tty/serial/qcom_geni_serial.c
+index 32ec632fd0807fd0a41afe3713ec2145d05ba2a9..9e3122b5124ce060b6fedf4a411d219d4ef1c34e 100644
+--- a/drivers/tty/serial/qcom_geni_serial.c
++++ b/drivers/tty/serial/qcom_geni_serial.c
+@@ -2018,6 +2018,7 @@ static int qcom_geni_serial_suspend(struct device *dev)
+ 	struct qcom_geni_serial_port *port = dev_get_drvdata(dev);
+ 	struct uart_port *uport = &port->uport;
+ 	struct qcom_geni_private_data *private_data = uport->private_data;
++	int ret;
+ 
+ 	/*
+ 	 * This is done so we can hit the lowest possible state in suspend
+@@ -2027,7 +2028,18 @@ static int qcom_geni_serial_suspend(struct device *dev)
+ 		geni_icc_set_tag(&port->se, QCOM_ICC_TAG_ACTIVE_ONLY);
+ 		geni_icc_set_bw(&port->se);
+ 	}
+-	return uart_suspend_port(private_data->drv, uport);
++	ret = uart_suspend_port(private_data->drv, uport);
++#ifdef CONFIG_PM
++	if (of_machine_is_compatible("google,coral") &&
++	    uport->mapbase == 0xc8c000)
++		dev_info(dev,
++			 "coral-uart post-suspend ret=%d uart_suspended=%d runtime=%d usage=%d active_children=%d disable_depth=%u\n",
++			 ret, uport->suspended, dev->power.runtime_status,
++			 atomic_read(&dev->power.usage_count),
++			 atomic_read(&dev->power.child_count),
++			 dev->power.disable_depth);
++#endif
++	return ret;
+ }
+ 
+ static int qcom_geni_serial_resume(struct device *dev)

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 [Unit]
 Description=Coral daily phone policy
 After=systemd-user-sessions.service systemd-modules-load.service coral-hexagonrpcd.service

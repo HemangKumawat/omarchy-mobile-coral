@@ -1,0 +1,1608 @@
+From 6315c883538b Mon Sep 17 00:00:00 2001
+From: Hemang Kumawat <HemangKumawat@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 02:43:14 +0200
+Subject: [PATCH 6] coral: add calibrated display, wake touch and bounded charging
+
+Wire panel followers with balanced gesture IRQ wake, calibrated 90Hz and low-power panel controls, stock coral haptic resources, MAX1730x identity handling, and PM8150B SRAM battery temperature. Correct SMB5 register encoding and status, bound charging to board limits, and retain measured hardware JEITA configuration.
+
+Source commit: 6315c883538b (diff against 472bb39eac2a).
+Assisted-by: AI agents (Codex, Claude) under the author's direction
+---
+ arch/arm64/boot/dts/qcom/sm8150-google-coral.dts   |  74 ++++++-
+ .../gpu/drm/panel/panel-samsung-s6e3hc2-gamma.h    | 155 +++++++++++++++
+ drivers/gpu/drm/panel/panel-samsung-s6e3hc2-lp.h   |  74 +++++++
+ drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c      |  66 ++++++-
+ drivers/input/touchscreen/fts_touch/fts.c          | 216 ++++++++++++---------
+ drivers/input/touchscreen/fts_touch/fts.h          |   5 +-
+ drivers/power/supply/max1720x_battery.c            |  67 +++++--
+ drivers/power/supply/qcom_fg.c                     |  38 ++--
+ drivers/power/supply/qcom_fg_gen4_temp.h           | 111 +++++++++++
+ drivers/power/supply/qcom_smbx.c                   | 181 ++++++++++++-----
+ 10 files changed, 799 insertions(+), 188 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+index dbc360756889db6df8ed8d26e7078815ccf6ddf2..f6a7a1812dad249bce31adde4621ace9b0078f5b 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+@@ -41,6 +41,9 @@ &framebuffer0 {
+ &battery {
+ 	charge-full-design-microamp-hours = <3700000>;
+ 	energy-full-design-microwatt-hours = <14245000>;
++	/* Conservative bootstrap until pack telemetry is corroborated. */
++	voltage-max-design-microvolt = <4200000>;
++	constant-charge-current-max-microamp = <500000>;
+ };
+ 
+ /*
+@@ -50,8 +53,9 @@ &battery {
+  * the driver, as mainline panel drivers own their DSC config.
+  */
+ &mdss_dsi0 {
+-	panel@0 {
++	coral_panel: panel@0 {
+ 		compatible = "samsung,s6e3hc2";
++		touch-rate-gpios = <&tlmm 128 GPIO_ACTIVE_HIGH>;
+ 	};
+ };
+ 
+@@ -62,6 +66,9 @@ panel@0 {
+  * flame's blob must never reach the coral touch controller.
+  */
+ &touchscreen {
++	panel = <&coral_panel>;
++	wakeup-source;
++	/delete-property/ st,disp-rate-gpio;
+ 	st,max-coords = <1439 3039>;
+ 	st,disable-auto-fw-update;
+ 	firmware-name = "qcom/sm8150/google/coral/ftm5_fw_c2.ftb";
+@@ -124,3 +131,68 @@ &vreg_l4c_1p8 {
+ &spi8 { status = "disabled"; };
+ &spi10 { status = "disabled"; };
+ &spi11 { status = "disabled"; };
++
++/* Stock coral dtbo fragment79: CS40L25A board calibration, GPIOs and DSP clock. */
++&i2c15 {
++	haptics@43 {
++		compatible = "cirrus,cs40l25a";
++		reg = <0x43>;
++		reset-gpios = <&tlmm 152 GPIO_ACTIVE_HIGH>;
++		interrupt-parent = <&tlmm>;
++		interrupts = <129 IRQ_TYPE_LEVEL_LOW>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&coral_haptic_pins>;
++		cirrus,boost-ind-nanohenry = <1000>;
++		cirrus,boost-cap-microfarad = <4>;
++		cirrus,boost-ipk-milliamp = <4500>;
++		cirrus,boost-ctl-millivolt = <10000>;
++		cirrus,boost-ovp-millivolt = <11000>;
++		cirrus,f0-default = <0x265c50>;
++		cirrus,f0-min = <0x230000>;
++		cirrus,f0-max = <0x294000>;
++		cirrus,redc-comp-disable = <1>;
++		cirrus,redc-default = <0x50030>;
++		cirrus,redc-min = <0x49c20>;
++		cirrus,redc-max = <0x5a260>;
++		cirrus,gpio1-rise-index = <5>;
++		cirrus,gpio1-fall-index = <4>;
++		cirrus,gpio1-fall-timeout = <0xb8ae>;
++		cirrus,gpio1-mode = <2>;
++		cirrus,hiber-enable;
++		cirrus,refclk-gpio2 = <1>;
++		cirrus,asp-bclk-freq-hz = <6144000>;
++		cirrus,asp-bclk-inv;
++		cirrus,asp-fmt = <0>;
++		cirrus,asp-slot-num = <2>;
++		cirrus,asp-slot-width = <32>;
++		cirrus,asp-samp-width = <24>;
++	};
++};
++
++&tlmm {
++	coral_haptic_pins: coral-haptic-pins-state {
++		reset-pins {
++			pins = "gpio152";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
++		};
++		irq-pins {
++			pins = "gpio129";
++			function = "gpio";
++			bias-disable;
++		};
++	};
++};
++
++/* Internal VBAT mux: binding and adc5_chans_pmic both define 1/3 scaling.
++ * This is independent voltage evidence, not a replacement battery gauge.
++ * Stock battery thermistor is on FG-gen4, not a board/charger thermistor.
++ */
++&pm8150b_adc {
++	channel@84 {
++		reg = <ADC5_VBAT_SNS>;
++		qcom,pre-scaling = <1 3>;
++		label = "vbat_sns";
++	};
++};
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3hc2-gamma.h b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2-gamma.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..bea79624a89128ddabbd55349f77679ae41856ee
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2-gamma.h
+@@ -0,0 +1,155 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Adapted from Google coral dsi_panel_switch.c at 82a738b32e3f.
++ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
++ * OTP is 60 Hz, panel flash is 90 Hz. Never substitute another panel's curves.
++ */
++static const struct {
++	u8 cmd;
++	u16 len, offset;
++	u8 prefix;
++} s6e3hc2_gamma_tables[] = {
++	{ 0xc8, 135, 0x0000, 0 },
++	{ 0xc9, 180, 0x0087, 0 },
++	{ 0xb3, 47, 0x013b, 2 },
++};
++
++static int s6e3hc2_gamma_color(u8 *buf, int band, int color)
++{
++	int index = (band % 4) * 3 + color;
++	int group = 15 * (band / 4);
++	int shift = 2 * ((index % 4) + 1);
++
++	return ((buf[group + index / 4] & (3 << (8 - shift))) << shift) |
++		buf[group + 3 + index];
++}
++
++static void s6e3hc2_gamma_set_color(u8 *buf, int band, int color, int value)
++{
++	int index = (band % 4) * 3 + color;
++	int group = 15 * (band / 4);
++	int shift = 2 * ((index % 4) + 1);
++	u8 mask = 3 << (8 - shift);
++
++	buf[group + 3 + index] = value;
++	buf[group + index / 4] &= ~mask;
++	buf[group + index / 4] |= (value >> shift) & mask;
++}
++
++static int s6e3hc2_gamma_swap(struct s6e3hc2 *ctx)
++{
++	u8 *low = ctx->gamma[0][0] + 46;
++	u8 *high = ctx->gamma[1][0] + 46;
++	int a[3], b[3], c;
++
++	if (s6e3hc2_gamma_color(high, 7, 1) - s6e3hc2_gamma_color(low, 7, 1) <
++	    s6e3hc2_gamma_color(high, 8, 1) - s6e3hc2_gamma_color(low, 8, 1))
++		return 0;
++	for (c = 0; c < 3; c++) {
++		a[c] = s6e3hc2_gamma_color(low, 7, c) +
++			s6e3hc2_gamma_color(high, 8, c) -
++			s6e3hc2_gamma_color(low, 8, c);
++		b[c] = s6e3hc2_gamma_color(low, 8, c) +
++			s6e3hc2_gamma_color(high, 7, c) -
++			s6e3hc2_gamma_color(low, 7, c);
++		if (a[c] < 0 || a[c] > 1023 || b[c] < 0 || b[c] > 1023)
++			return -ERANGE;
++	}
++	for (c = 0; c < 3; c++) {
++		s6e3hc2_gamma_set_color(high, 7, c, a[c]);
++		s6e3hc2_gamma_set_color(high, 8, c, b[c]);
++	}
++	return 0;
++}
++
++static int s6e3hc2_gamma_read(struct s6e3hc2 *ctx)
++{
++	struct mipi_dsi_device *dsi = ctx->dsi;
++	struct mipi_dsi_multi_context mc = { .dsi = dsi };
++	u8 revision, tmp[2];
++	int ret, cleanup, i, j;
++
++	if (ctx->gamma_ready)
++		return 0;
++	ret = mipi_dsi_dcs_read(dsi, 0xda, &revision, 1);
++	if (ret != 1 || !(revision & 0xf0))
++		return ret < 0 ? ret : -ENODEV;
++	mipi_dsi_dcs_write_seq_multi(&mc, 0xf0, 0x5a, 0x5a);
++	for (i = 0; i < ARRAY_SIZE(s6e3hc2_gamma_tables); i++) {
++		ctx->gamma[0][i][0] = s6e3hc2_gamma_tables[i].cmd;
++		ctx->gamma[1][i][0] = s6e3hc2_gamma_tables[i].cmd;
++		ret = mc.accum_err ?: mipi_dsi_dcs_read(dsi,
++			s6e3hc2_gamma_tables[i].cmd, ctx->gamma[0][i] + 1,
++			s6e3hc2_gamma_tables[i].len);
++		if (ret != s6e3hc2_gamma_tables[i].len) {
++			ret = ret < 0 ? ret : -EIO;
++			goto out;
++		}
++	}
++	/* Stock flash read sequence: enable quad read, never erase/program data. */
++	mipi_dsi_dcs_write_seq_multi(&mc, 0xf1, 0xf1, 0xa2);
++	mipi_dsi_dcs_write_seq_multi(&mc, 0xc0, 0x02);
++	mipi_dsi_dcs_write_seq_multi(&mc, 0xc1,
++		0, 0, 0, 0x06, 0, 0, 0, 0, 0, 0, 0, 0x05);
++	mipi_dsi_dcs_write_seq_multi(&mc, 0xc0, 0x03);
++	mipi_dsi_usleep_range(&mc, 950, 1000);
++	mipi_dsi_dcs_write_seq_multi(&mc, 0xc1,
++		0, 0, 0, 0x01, 0x40, 0x02, 0, 0, 0, 0, 0x10);
++	mipi_dsi_dcs_write_seq_multi(&mc, 0xc0, 0x03);
++	mipi_dsi_msleep(&mc, 30);
++	for (i = 0; i < ARRAY_SIZE(s6e3hc2_gamma_tables); i++) {
++		u8 *buf = ctx->gamma[1][i] + 1;
++		u16 offset = s6e3hc2_gamma_tables[i].offset;
++
++		memcpy(buf, ctx->gamma[0][i] + 1, s6e3hc2_gamma_tables[i].prefix);
++		for (j = s6e3hc2_gamma_tables[i].prefix;
++		     j < s6e3hc2_gamma_tables[i].len; j++, offset++) {
++			u8 read[] = { 0xc1, 0, 0, 0, 0x6b, 0, 0, 0, 0x0a,
++				offset >> 8, offset & 0xff, 0, 0x05, 0x01 };
++
++			mipi_dsi_dcs_write_buffer_multi(&mc, read, sizeof(read));
++			mipi_dsi_dcs_write_seq_multi(&mc, 0xc0, 0x03);
++			mipi_dsi_usleep_range(&mc, 200, 250);
++			mipi_dsi_dcs_write_seq_multi(&mc, 0xb0, 0x0b);
++			ret = mc.accum_err ?: mipi_dsi_dcs_read(dsi, 0xfb, tmp, 2);
++			if (ret != 2) {
++				ret = ret < 0 ? ret : -EIO;
++				goto out;
++			}
++			buf[j] = tmp[1];
++		}
++		if (i < 2)
++			for (j = 0; j < s6e3hc2_gamma_tables[i].len; j += 45)
++				memset(buf + j + 39, 0, 3);
++	}
++	ret = s6e3hc2_gamma_swap(ctx);
++out:
++	/* Always close flash access and lock, including short reads/errors. */
++	cleanup = mipi_dsi_dcs_write(dsi, 0xc0, (u8[]){ 0 }, 1);
++	if (cleanup < 0 && ret >= 0)
++		ret = cleanup;
++	cleanup = mipi_dsi_dcs_write(dsi, 0xf1, (u8[]){ 0xa5, 0xa5 }, 2);
++	if (cleanup < 0 && ret >= 0)
++		ret = cleanup;
++	cleanup = mipi_dsi_dcs_write(dsi, 0xf0, (u8[]){ 0xa5, 0xa5 }, 2);
++	if (cleanup < 0 && ret >= 0)
++		ret = cleanup;
++	ctx->gamma_ready = ret == 0;
++	return ret;
++}
++
++static int s6e3hc2_gamma_write(struct s6e3hc2 *ctx)
++{
++	struct mipi_dsi_multi_context mc = { .dsi = ctx->dsi };
++	int i, mode = ctx->refresh_rate == 90;
++	u8 ctrl[] = { 0x53, mode ? 0x30 : 0x20 };
++
++	mipi_dsi_dcs_write_seq_multi(&mc, 0xf0, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_buffer_multi(&mc, ctrl, sizeof(ctrl));
++	if (ctx->gamma_ready)
++		for (i = 0; i < ARRAY_SIZE(s6e3hc2_gamma_tables); i++)
++			mipi_dsi_dcs_write_buffer_multi(&mc, ctx->gamma[mode][i],
++						s6e3hc2_gamma_tables[i].len + 1);
++	/* Lock even after an update failure. */
++	i = mipi_dsi_dcs_write(ctx->dsi, 0xf0, (u8[]){ 0xa5, 0xa5 }, 2);
++	return mc.accum_err ?: (i < 0 ? i : 0);
++}
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3hc2-lp.h b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2-lp.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c398417553b3d5075421687e4058242a35d7ee9
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2-lp.h
+@@ -0,0 +1,74 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Commands from coral stock dtbo google,lp-modes + lp1/nolp/post-nolp. */
++static int s6e3hc2_set_lp(struct s6e3hc2 *ctx, unsigned int mode)
++{
++	struct mipi_dsi_multi_context mc = { .dsi = ctx->dsi };
++	u8 ctrl[] = { 0x53, mode == 1 ? 0x03 : 0x02 };
++	u8 level[] = { 0xbb, mode == 1 ? 0x80 : 0x00 };
++	int ret;
++
++	mipi_dsi_dcs_set_display_off_multi(&mc);
++	mipi_dsi_msleep(&mc, mode ? 17 : 0);
++	mipi_dsi_dcs_write_seq_multi(&mc, 0xf0, 0x5a, 0x5a);
++	if (mode) {
++		mipi_dsi_dcs_write_seq_multi(&mc, 0xb0, 0x3f, 0xb5);
++		mipi_dsi_dcs_write_seq_multi(&mc, 0xb5, 0x05);
++		mipi_dsi_dcs_write_buffer_multi(&mc, ctrl, sizeof(ctrl));
++		mipi_dsi_msleep(&mc, 36);
++		mipi_dsi_dcs_write_seq_multi(&mc, 0xb0, 0xa8, 0xb1);
++		mipi_dsi_dcs_write_seq_multi(&mc, 0xb1, 0x00);
++		mipi_dsi_dcs_write_seq_multi(&mc, 0xb0, 0x05, 0xbb);
++		mipi_dsi_dcs_write_buffer_multi(&mc, level, sizeof(level));
++		mipi_dsi_dcs_write_seq_multi(&mc, 0xf7, 0x02);
++	} else {
++		u8 normal[] = { 0x53, ctx->refresh_rate == 90 ? 0x30 : 0x20 };
++
++		mipi_dsi_dcs_write_seq_multi(&mc, 0xb0, 0xa8, 0xb1);
++		mipi_dsi_dcs_write_seq_multi(&mc, 0xb1, 0x01);
++		mipi_dsi_dcs_write_buffer_multi(&mc, normal, sizeof(normal));
++		mipi_dsi_dcs_write_seq_multi(&mc, 0xb0, 0x3f, 0xb5);
++		mipi_dsi_dcs_write_seq_multi(&mc, 0xb5, 0x85);
++		mipi_dsi_msleep(&mc, 34);
++		ret = mc.accum_err ?: s6e3hc2_gamma_write(ctx);
++		if (ret)
++			mc.accum_err = ret;
++	}
++	ret = mipi_dsi_dcs_write(ctx->dsi, 0xf0, (u8[]){ 0xa5, 0xa5 }, 2);
++	if (!mc.accum_err && ret < 0)
++		mc.accum_err = ret;
++	mipi_dsi_msleep(&mc, mode ? 0 : 17);
++	mipi_dsi_dcs_set_display_on_multi(&mc);
++	if (!mc.accum_err)
++		ctx->lp_mode = mode;
++	return mc.accum_err;
++}
++
++static ssize_t lp_mode_show(struct device *dev, struct device_attribute *attr,
++			   char *buf)
++{
++	struct s6e3hc2 *ctx = dev_get_drvdata(dev);
++
++	guard(mutex)(&ctx->lock);
++	return sysfs_emit(buf, "%u\n", ctx->lp_mode);
++}
++
++static ssize_t lp_mode_store(struct device *dev, struct device_attribute *attr,
++			    const char *buf, size_t count)
++{
++	struct s6e3hc2 *ctx = dev_get_drvdata(dev);
++	unsigned int mode;
++	int ret = kstrtouint(buf, 10, &mode);
++
++	if (ret || mode > 2)
++		return -EINVAL;
++	guard(mutex)(&ctx->lock);
++	if (!ctx->powered)
++		return -EBUSY;
++	if (mode == ctx->lp_mode)
++		return count;
++	ret = s6e3hc2_set_lp(ctx, mode);
++	return ret ?: count;
++}
++static DEVICE_ATTR_RW(lp_mode);
++static struct attribute *s6e3hc2_attrs[] = { &dev_attr_lp_mode.attr, NULL };
++static const struct attribute_group s6e3hc2_attr_group = { .attrs = s6e3hc2_attrs };
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
+index 6ada1a6a63114212c0a37edab8d880a91d84b46a..53456b139dc97796f85ff523e143a111e9c0677a 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
+@@ -3,13 +3,14 @@
+ // Google coral (Pixel 4 XL) stock dtbo, board-id 0x51e05, node
+ // qcom,mdss_dsi_s6e3hc2 ("s6e3hc2 amoled 6.2 cmd mode panel").
+ // Supplies and voltages from dsi_panel_pwr_supply_floral in the same dtbo.
+-// ponytail: 60 Hz timing@0 only; timing@1 (90 Hz) differs only in framerate.
++// Stock timings, rate commands and per-panel gamma for 60/90 Hz.
+ 
+ #include <linux/backlight.h>
+ #include <linux/delay.h>
+ #include <linux/mod_devicetable.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/regulator/consumer.h>
+ 
+ #include <video/mipi_display.h>
+@@ -17,6 +18,8 @@
+ #include <drm/display/drm_dsc.h>
+ #include <drm/display/drm_dsc_helper.h>
+ #include <drm/drm_mipi_dsi.h>
++#include <drm/drm_connector.h>
++#include <drm/drm_crtc.h>
+ #include <drm/drm_modes.h>
+ #include <drm/drm_panel.h>
+ #include <drm/drm_probe_helper.h>
+@@ -27,8 +30,17 @@ struct s6e3hc2 {
+ 	struct drm_dsc_config dsc;
+ 	struct regulator_bulk_data *supplies;
+ 	struct gpio_desc *reset_gpio;
++	struct gpio_desc *touch_rate_gpio;
++	struct drm_connector *connector;
++	struct mutex lock;
++	unsigned int refresh_rate, lp_mode;
++	bool powered, gamma_ready;
++	u8 gamma[2][3][181];
+ };
+ 
++#include "panel-samsung-s6e3hc2-gamma.h"
++#include "panel-samsung-s6e3hc2-lp.h"
++
+ /* stock: vddio 1.84 V, vci 3.0 V (qcom,panel-supply-entry@0/1) */
+ static const struct regulator_bulk_data s6e3hc2_supplies[] = {
+ 	{ .supply = "vddio" },
+@@ -55,6 +67,7 @@ static void s6e3hc2_reset(struct s6e3hc2 *ctx)
+ static int s6e3hc2_on(struct s6e3hc2 *ctx)
+ {
+ 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++	int ret;
+ 
+ 	mipi_dsi_compression_mode_multi(&dsi_ctx, true);
+ 	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+@@ -75,6 +88,17 @@ static int s6e3hc2_on(struct s6e3hc2 *ctx)
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0xa5, 0xa5);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf1, 0xa5, 0xa5);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfc, 0xa5, 0xa5);
++	if (dsi_ctx.accum_err)
++		return dsi_ctx.accum_err;
++	if (ctx->refresh_rate == 90) {
++		ret = s6e3hc2_gamma_read(ctx);
++		if (ret)
++			return ret;
++	}
++	ret = s6e3hc2_gamma_write(ctx);
++	if (ret)
++		return ret;
++	gpiod_set_value_cansleep(ctx->touch_rate_gpio, ctx->refresh_rate == 90);
+ 	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
+ 
+ 	return dsi_ctx.accum_err;
+@@ -99,6 +123,13 @@ static int s6e3hc2_prepare(struct drm_panel *panel)
+ 	struct drm_dsc_picture_parameter_set pps;
+ 	int ret;
+ 
++	guard(mutex)(&ctx->lock);
++	ctx->refresh_rate = 60;
++	if (ctx->connector && ctx->connector->state && ctx->connector->state->crtc)
++		ctx->refresh_rate = drm_mode_vrefresh(
++			&ctx->connector->state->crtc->state->mode);
++	if (ctx->refresh_rate != 60 && ctx->refresh_rate != 90)
++		return -EINVAL;
+ 	ret = regulator_bulk_enable(ARRAY_SIZE(s6e3hc2_supplies), ctx->supplies);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to enable regulators: %d\n", ret);
+@@ -130,6 +161,8 @@ static int s6e3hc2_prepare(struct drm_panel *panel)
+ 	}
+ 
+ 	msleep(28); /* TODO: Is this panel-dependent? */
++	ctx->powered = true;
++	ctx->lp_mode = 0;
+ 
+ 	return 0;
+ }
+@@ -155,6 +188,9 @@ static int s6e3hc2_unprepare(struct drm_panel *panel)
+ 	struct device *dev = &ctx->dsi->dev;
+ 	int ret;
+ 
++	guard(mutex)(&ctx->lock);
++	ctx->powered = false;
++	ctx->lp_mode = 0;
+ 	ret = s6e3hc2_off(ctx);
+ 	if (ret < 0)
+ 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
+@@ -183,7 +219,24 @@ static const struct drm_display_mode s6e3hc2_mode = {
+ static int s6e3hc2_get_modes(struct drm_panel *panel,
+ 			     struct drm_connector *connector)
+ {
+-	return drm_connector_helper_get_modes_fixed(connector, &s6e3hc2_mode);
++	struct s6e3hc2 *ctx = to_s6e3hc2(panel);
++	struct drm_display_mode *mode;
++	int rate;
++
++	for (rate = 60; rate <= 90; rate += 30) {
++		mode = drm_mode_duplicate(connector->dev, &s6e3hc2_mode);
++		if (!mode)
++			return -ENOMEM;
++		mode->clock = 1540 * 3072 * rate / 1000;
++		mode->type |= rate == 90 ? DRM_MODE_TYPE_PREFERRED : 0;
++		drm_mode_set_name(mode);
++		drm_mode_probed_add(connector, mode);
++	}
++	connector->display_info.bpc = 8;
++	connector->display_info.width_mm = 68;
++	connector->display_info.height_mm = 143;
++	ctx->connector = connector;
++	return 2;
+ }
+ 
+ static const struct drm_panel_funcs s6e3hc2_panel_funcs = {
+@@ -280,6 +333,8 @@ static int s6e3hc2_probe(struct mipi_dsi_device *dsi)
+ 				     "Failed to get reset-gpios\n");
+ 
+ 	ctx->dsi = dsi;
++	mutex_init(&ctx->lock);
++	ctx->refresh_rate = 60;
+ 	mipi_dsi_set_drvdata(dsi, ctx);
+ 
+ 	dsi->lanes = 4;
+@@ -287,6 +342,13 @@ static int s6e3hc2_probe(struct mipi_dsi_device *dsi)
+ 	dsi->mode_flags = MIPI_DSI_MODE_NO_EOT_PACKET |
+ 			  MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM;
+ 
++	ctx->touch_rate_gpio = devm_gpiod_get_optional(dev, "touch-rate", GPIOD_OUT_LOW);
++	if (IS_ERR(ctx->touch_rate_gpio))
++		return dev_err_probe(dev, PTR_ERR(ctx->touch_rate_gpio), "touch rate GPIO\n");
++	ret = devm_device_add_group(dev, &s6e3hc2_attr_group);
++	if (ret)
++		return ret;
++
+ 	ctx->panel.prepare_prev_first = true;
+ 
+ 	ctx->panel.backlight = s6e3hc2_create_backlight(dsi);
+diff --git a/drivers/input/touchscreen/fts_touch/fts.c b/drivers/input/touchscreen/fts_touch/fts.c
+index 92010d2f33799f381fd227777bd088d23aaa6d7f..b09913fb9c0b81ef5877f5518ccbcc3203163139 100644
+--- a/drivers/input/touchscreen/fts_touch/fts.c
++++ b/drivers/input/touchscreen/fts_touch/fts.c
+@@ -3995,6 +3995,7 @@ static irqreturn_t fts_interrupt_handler(int irq, void *handle)
+ 	unsigned char events_remaining = 0;
+ 	unsigned char *evt_data;
+ 	bool processed_pointer_event = false;
++	bool gesture_irq = READ_ONCE(info->sensor_sleep);
+ 
+ #ifdef CONFIG_TOUCHSCREEN_OFFLOAD
+ 	struct touch_offload_frame *frame = NULL;
+@@ -4003,7 +4004,10 @@ static irqreturn_t fts_interrupt_handler(int irq, void *handle)
+ 	/* It is possible that interrupts were disabled while the handler is
+ 	 * executing, before acquiring the mutex. If so, simply return.
+ 	 */
+-	if (fts_set_bus_ref(info, FTS_BUS_REF_IRQ, true) < 0) {
++	if (gesture_irq && (!READ_ONCE(info->gesture_ready) ||
++		!IS_POWER_MODE(info->mode, SCAN_MODE_LOW_POWER)))
++		return IRQ_HANDLED;
++	if (!gesture_irq && fts_set_bus_ref(info, FTS_BUS_REF_IRQ, true) < 0) {
+ 		fts_set_bus_ref(info, FTS_BUS_REF_IRQ, false);
+ 		return IRQ_HANDLED;
+ 	}
+@@ -4090,7 +4094,8 @@ static irqreturn_t fts_interrupt_handler(int irq, void *handle)
+ 	update_motion_filter(info);
+ 
+ 	cpu_latency_qos_update_request(&info->pm_qos_req, PM_QOS_DEFAULT_VALUE);
+-	fts_set_bus_ref(info, FTS_BUS_REF_IRQ, false);
++	if (!gesture_irq)
++		fts_set_bus_ref(info, FTS_BUS_REF_IRQ, false);
+ 	return IRQ_HANDLED;
+ }
+ /** @}*/
+@@ -4572,6 +4577,14 @@ int fts_chip_powercycle(struct fts_ts_info *info)
+ static int fts_init_sensing(struct fts_ts_info *info)
+ {
+ 	int error = 0;
++	u8 gesture[GESTURE_MASK_SIZE] = { 0 };
++
++	/* Volatile gesture mask only; never touch firmware or calibration. */
++	fromIDtoMask(GEST_ID_DBLTAP, gesture, sizeof(gesture));
++	error = updateGestureMask(gesture, sizeof(gesture), FEAT_ENABLE);
++	if (error < OK)
++		return error;
++	info->gesture_enabled = 1;
+ 	error |= fts_interrupt_install(info);	/* register event handler */
+ 	error |= fts_mode_handler(info, 0);	/* enable the features and
+ 						 * sensing */
+@@ -4605,16 +4618,42 @@ static int fts_init_sensing(struct fts_ts_info *info)
+   * the feature changed status or the IC had a system reset
+   * @return OK if success or an error code which specify the type of error
+   */
++/* Caller holds mode_mutex; update software state only after the IRQ API succeeds. */
++static int fts_irq_wake_set(struct fts_ts_info *info, bool enable)
++{
++	int ret;
++
++	if (info->irq_wake_enabled == enable)
++		return 0;
++	ret = enable ? enable_irq_wake(info->client->irq) :
++		disable_irq_wake(info->client->irq);
++	if (ret) {
++		pr_err("fts: IRQ wake %s failed: %d\n", enable ? "enable" : "disable", ret);
++		return ret;
++	}
++	WRITE_ONCE(info->irq_wake_enabled, enable);
++	return 0;
++}
++
++static bool fts_suspend_ready(struct fts_ts_info *info)
++{
++	return !info->bus_refmask && !info->resume_bit && info->sensor_sleep &&
++		info->gesture_ready && info->irq_wake_enabled &&
++		IS_POWER_MODE(info->mode, SCAN_MODE_LOW_POWER);
++}
++
+ static int fts_mode_handler(struct fts_ts_info *info, int force)
+ {
+ 	int res = OK;
+ 	int ret = OK;
+ 	u8 settings[4] = { 0 };
+ 
+-	/* disable irq wake because resuming from gesture mode */
+-	if (IS_POWER_MODE(info->mode, SCAN_MODE_LOW_POWER) &&
+-	    (info->resume_bit == 1))
+-		disable_irq_wake(info->client->irq);
++	guard(mutex)(&info->mode_mutex);
++	/* Recovery may re-enter low power repeatedly; never accumulate wake depth. */
++	WRITE_ONCE(info->gesture_ready, false);
++	ret = fts_irq_wake_set(info, false);
++	if (ret)
++		return ret;
+ 
+ 	info->mode = MODE_NOTHING;	/* initialize the mode to nothing
+ 					  * in order to be updated depending
+@@ -4631,8 +4670,10 @@ static int fts_mode_handler(struct fts_ts_info *info, int force)
+ 		/* for speed reason (no need to check echo in this case and
+ 		  * interrupt can be enabled) */
+ 		ret = setScanMode(SCAN_MODE_ACTIVE, 0x00);
+-		res |= ret;	/* to avoid warning unsused ret variable when a
+-				  * ll the features are disabled */
++		if (ret < OK) {
++			pr_err("fts: sense-off failed: %08X\n", ret);
++			return ret;
++		}
+ 
+ #ifdef GESTURE_MODE
+ 		if (info->gesture_enabled == 1) {
+@@ -4640,11 +4681,16 @@ static int fts_mode_handler(struct fts_ts_info *info, int force)
+ 				 __func__);
+ 			res = enterGestureMode(isSystemResettedDown());
+ 			if (res >= OK) {
+-				enable_irq_wake(info->client->irq);
++				ret = fts_irq_wake_set(info, true);
++				if (ret) {
++					pr_err("fts: gesture IRQ wake failed: %d\n", ret);
++					return ret;
++				}
+ 				fromIDtoMask(FEAT_SEL_GESTURE,
+ 					     (u8 *)&info->mode,
+ 					     sizeof(info->mode));
+ 				MODE_LOW_POWER(info->mode, 0);
++				WRITE_ONCE(info->gesture_ready, true);
+ 			} else
+ 				pr_err("%s: enterGestureMode failed! ERROR %08X recovery in senseOff...\n",
+ 					__func__, res);
+@@ -4815,6 +4861,7 @@ static void fts_resume_work(struct work_struct *work)
+ 
+ 	__pm_wakeup_event(info->wakesrc, jiffies_to_msecs(HZ));
+ 
++	fts_enableInterrupt(false);
+ 	info->resume_bit = 1;
+ 
+ 	fts_system_reset();
+@@ -4842,6 +4889,7 @@ static void fts_resume_work(struct work_struct *work)
+ static void fts_suspend_work(struct work_struct *work)
+ {
+ 	struct fts_ts_info *info;
++	int ret;
+ 
+ 	info = container_of(work, struct fts_ts_info, suspend_work);
+ 
+@@ -4852,26 +4900,20 @@ static void fts_suspend_work(struct work_struct *work)
+ 
+ 	__pm_stay_awake(info->wakesrc);
+ 
+-	info->resume_bit = 0;
+-
+-	fts_mode_handler(info, 0);
+-
+-	release_all_touches(info);
+-
++	/* Drain active touches before enabling the low-power gesture scanner.
++	 * A reset here would erase gesture mode. SLPI is not the bus owner.
++	 */
+ 	fts_enableInterrupt(false);
+-
+-	/* Flush any outstanding touch events */
+-	fts_system_reset();
+ 	flushFIFO();
+-
+-	fts_set_switch_gpio(info, FTS_SWITCH_GPIO_VALUE_SLPI_MASTER);
+-
+-#ifdef CONFIG_TOUCHSCREEN_TBN
+-	if (info->tbn)
+-		tbn_release_bus(info->tbn);
+-#endif
+-
+-	info->sensor_sleep = true;
++	info->resume_bit = 0;
++	ret = fts_mode_handler(info, 0);
++	if (ret < OK)
++		pr_err("fts: gesture suspend setup failed: %08X\n", ret);
++	release_all_touches(info);
++	fts_set_switch_gpio(info, FTS_SWITCH_GPIO_VALUE_AP_MASTER);
++	WRITE_ONCE(info->sensor_sleep, true);
++	/* enterGestureMode() may itself enable IRQs before a later failure. */
++	fts_enableInterrupt(READ_ONCE(info->gesture_ready));
+ 	__pm_relax(info->wakesrc);
+ }
+ /** @}*/
+@@ -4939,72 +4981,33 @@ int fts_set_bus_ref(struct fts_ts_info *info, u16 ref, bool enable)
+ 	return result;
+ }
+ 
+-// /**
+-//   * Callback function used to detect the suspend/resume events generated by
+-//   * clicking the power button.
+-//   * This function schedule a suspend or resume work according to the event
+-//   * received.
+-//   */
+-// static int fts_screen_state_chg_callback(struct notifier_block *nb,
+-// 					 unsigned long val, void *data)
+-// {
+-// 	struct fts_ts_info *info = container_of(nb, struct fts_ts_info,
+-// 						notifier);
+-// 	struct msm_drm_notifier *evdata = data;
+-// 	unsigned int blank;
+-
+-// 	if (val != MSM_DRM_EVENT_BLANK && val != MSM_DRM_EARLY_EVENT_BLANK)
+-// 		return NOTIFY_DONE;
+-
+-// 	if (!info || !evdata || !evdata->data) {
+-// 		pr_info("%s: Bad fts notifier call!\n", __func__);
+-// 		return NOTIFY_DONE;
+-// 	}
+-
+-// 	pr_debug("%s: fts notifier begin!\n", __func__);
+-
+-// 	blank = *(int *) (evdata->data);
+-// 	switch (blank) {
+-// 	case MSM_DRM_BLANK_POWERDOWN:
+-// 	case MSM_DRM_BLANK_LP:
+-// 		if (val == MSM_DRM_EARLY_EVENT_BLANK) {
+-// 			pr_debug("%s: BLANK\n", __func__);
+-// 			fts_set_bus_ref(info, FTS_BUS_REF_SCREEN_ON, false);
+-// 		}
+-// 		break;
+-// 	case MSM_DRM_BLANK_UNBLANK:
+-// 		if (val == MSM_DRM_EVENT_BLANK) {
+-// 			pr_debug("%s: UNBLANK\n", __func__);
+-// 			fts_set_bus_ref(info, FTS_BUS_REF_SCREEN_ON, true);
+-// 		}
+-// 		break;
+-// 	}
+-
+-// 	if (info->display_refresh_rate != evdata->refresh_rate) {
+-// 		info->display_refresh_rate = evdata->refresh_rate;
+-// 		if (gpio_is_valid(info->board->disp_rate_gpio))
+-// 			gpio_set_value(info->board->disp_rate_gpio,
+-// 				(info->display_refresh_rate == 90));
+-// 		pr_debug("Refresh rate changed to %d Hz.\n",
+-// 			info->display_refresh_rate);
+-// 	}
+-
+-// 	return NOTIFY_OK;
+-// }
++static int fts_panel_prepared(struct drm_panel_follower *follower)
++{
++	struct fts_ts_info *info = container_of(follower, struct fts_ts_info,
++					      panel_follower);
+ 
+-// static struct notifier_block fts_noti_block = {
+-// 	.notifier_call = fts_screen_state_chg_callback,
+-// };
++	if (!(info->bus_refmask & FTS_BUS_REF_SCREEN_ON))
++		fts_set_bus_ref(info, FTS_BUS_REF_SCREEN_ON, true);
++	flush_work(&info->resume_work);
++	return 0;
++}
++
++static int fts_panel_unpreparing(struct drm_panel_follower *follower)
++{
++	struct fts_ts_info *info = container_of(follower, struct fts_ts_info,
++					      panel_follower);
++
++	if (info->bus_refmask & FTS_BUS_REF_SCREEN_ON)
++		fts_set_bus_ref(info, FTS_BUS_REF_SCREEN_ON, false);
++	flush_work(&info->suspend_work);
++	return 0;
++}
++
++static const struct drm_panel_follower_funcs fts_panel_funcs = {
++	.panel_prepared = fts_panel_prepared,
++	.panel_unpreparing = fts_panel_unpreparing,
++};
+ 
+-/**
+-  * From the name of the power regulator get/put the actual regulator structs
+-  * (copying their references into fts_ts_info variable)
+-  * @param info pointer to fts_ts_info which contains info about the device and
+-  * its hw setup
+-  * @param get if 1, the regulators are get otherwise they are put (released)
+-  * back to the system
+-  * @return OK if success or an error code which specify the type of error
+-  */
+ static int fts_get_reg(struct fts_ts_info *info, bool get)
+ {
+ 	int retval;
+@@ -5500,6 +5503,7 @@ static int fts_probe(struct spi_device *client)
+ 
+ 	mutex_init(&(info->input_report_mutex));
+ 	mutex_init(&info->bus_mutex);
++	mutex_init(&info->mode_mutex);
+ 
+ 	/* Assume screen is on throughout probe */
+ 	info->bus_refmask = FTS_BUS_REF_SCREEN_ON;
+@@ -5536,7 +5540,7 @@ static int fts_probe(struct spi_device *client)
+ 	info->grip_enabled = 0;
+ 
+ 	info->resume_bit = 1;
+-	// info->notifier = fts_noti_block;
++
+ 
+ 	/* Set initial heatmap mode based on the device tree configuration.
+ 	 * Default is partial heatmap mode.
+@@ -5650,6 +5654,14 @@ static int fts_probe(struct spi_device *client)
+ 		goto ProbeErrorExit_7;
+ 	}
+ 
++	info->panel_follower.funcs = &fts_panel_funcs;
++	error = drm_panel_add_follower(&client->dev, &info->panel_follower);
++	if (error) {
++		sysfs_remove_group(&client->dev.kobj, &info->attrs);
++		goto ProbeErrorExit_7;
++	}
++	device_init_wakeup(&client->dev, true);
++
+ 	/* Raw maintenance commands must never be exposed on coral. */
+ 
+ 	if (info->fwu_workqueue)
+@@ -5728,6 +5740,9 @@ static void fts_remove(struct spi_device *client)
+ 
+ 	struct fts_ts_info *info = dev_get_drvdata(&(client->dev));
+ 
++	drm_panel_remove_follower(&info->panel_follower);
++	device_init_wakeup(&client->dev, false);
++
+ 	/* Force the bus active throughout removal of the client */
+ 	fts_set_bus_ref(info, FTS_BUS_REF_FORCE_ACTIVE, true);
+ 
+@@ -5742,6 +5757,14 @@ static void fts_remove(struct spi_device *client)
+ 	/* sysfs stuff */
+ 	sysfs_remove_group(&client->dev.kobj, &info->attrs);
+ 
++	/* Stop recovery IRQs before balancing wake depth and freeing the IRQ. */
++	fts_enableInterrupt(false);
++	synchronize_irq(client->irq);
++	{
++		guard(mutex)(&info->mode_mutex);
++		WRITE_ONCE(info->gesture_ready, false);
++		fts_irq_wake_set(info, false);
++	}
+ 	/* remove interrupt and event handlers */
+ 	fts_interrupt_uninstall(info);
+ 
+@@ -5795,12 +5818,15 @@ static int fts_pm_suspend(struct device *dev)
+ {
+ 	struct fts_ts_info *info = dev_get_drvdata(dev);
+ 
++	flush_work(&info->suspend_work);
+ 	if (info->bus_refmask)
+ 		pr_warn("%s: bus_refmask 0x%X\n", __func__, info->bus_refmask);
+ 
+-	if (info->resume_bit == 1 || info->sensor_sleep == false) {
+-		pr_warn("%s: can't suspend because touch bus is in use!\n",
+-			__func__);
++	guard(mutex)(&info->mode_mutex);
++	if (!fts_suspend_ready(info)) {
++		pr_warn("%s: touch/gesture wake not ready: sleep=%d gesture=%d irq_wake=%d mode=%08X\n",
++			__func__, info->sensor_sleep, info->gesture_ready,
++			info->irq_wake_enabled, info->mode);
+ 		return -EBUSY;
+ 	}
+ 
+diff --git a/drivers/input/touchscreen/fts_touch/fts.h b/drivers/input/touchscreen/fts_touch/fts.h
+index 4459782f380c9a582f71670bb02ddea4178f6935..f30ea19e1a238f91a41657acf999b3f3f257d233 100644
+--- a/drivers/input/touchscreen/fts_touch/fts.h
++++ b/drivers/input/touchscreen/fts_touch/fts.h
+@@ -444,7 +444,10 @@ struct fts_ts_info {
+ 
+ 	struct fts_disp_extinfo extinfo;	/* Display extended info */
+ 
+-	struct notifier_block notifier;	/* Notify on suspend/resume */
++	struct drm_panel_follower panel_follower;
++	struct mutex mode_mutex;
++	bool irq_wake_enabled;
++	bool gesture_ready;
+ 	int display_refresh_rate;	/* Display rate in Hz */
+ 	bool sensor_sleep;		/* True if suspend called */
+ 	struct wakeup_source *wakesrc;	/* Wake Lock struct */
+diff --git a/drivers/power/supply/max1720x_battery.c b/drivers/power/supply/max1720x_battery.c
+index e2bd54ee3970807310fe2121af712a007d8c1fa9..6400ea59e1c56b4f8a7fcb80025255283e859093 100644
+--- a/drivers/power/supply/max1720x_battery.c
++++ b/drivers/power/supply/max1720x_battery.c
+@@ -12,6 +12,7 @@
+ #include <linux/module.h>
+ #include <linux/nvmem-provider.h>
+ #include <linux/power_supply.h>
++#include <linux/property.h>
+ #include <linux/regmap.h>
+ 
+ #include <linux/unaligned.h>
+@@ -63,6 +64,7 @@ struct max1720x_device_info {
+ 	struct regmap *regmap_nv;
+ 	struct i2c_client *ancillary;
+ 	int rsense;
++	bool max1730x;
+ };
+ 
+ /*
+@@ -358,16 +360,40 @@ static int max172xx_battery_health(struct max1720x_device_info *info,
+ 	return 0;
+ }
+ 
++/* Google coral 4.14 max1730x register map; the common m5 registers stay put.
++ * This only changes volatile telemetry. No reset, NV override or flash writes.
++ */
++static int max1720x_read(struct max1720x_device_info *info, unsigned int reg,
++			unsigned int *val)
++{
++	if (info->max1730x) {
++		switch (reg) {
++		case MAX172XX_BATT: reg = 0x1a; break;
++		case MAX172XX_TEMP: reg = 0x1b; break;
++		case MAX172XX_CURRENT: reg = 0x1c; break;
++		case MAX172XX_AVG_CURRENT: reg = 0x1d; break;
++		}
++	}
++	return regmap_read(info->regmap, reg, val);
++}
++
+ static int max1720x_battery_get_property(struct power_supply *psy,
+ 					 enum power_supply_property psp,
+ 					 union power_supply_propval *val)
+ {
+ 	struct max1720x_device_info *info = power_supply_get_drvdata(psy);
+-	unsigned int reg_val;
++	unsigned int reg_val = 0;
+ 	int ret = 0;
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_HEALTH:
++		/* MAX1730x protection status differs; never clear 1720x alert bits.
++		 * UNKNOWN keeps charging policy from treating this as safety proof.
++		 */
++		if (info->max1730x) {
++			val->intval = POWER_SUPPLY_HEALTH_UNKNOWN;
++			break;
++		}
+ 		ret = max172xx_battery_health(info, &reg_val);
+ 		val->intval = reg_val;
+ 		break;
+@@ -377,7 +403,7 @@ static int max1720x_battery_get_property(struct power_supply *psy,
+ 		 * sysfs interface. Value return 0 if battery not
+ 		 * present or unaccesable via I2c.
+ 		 */
+-		ret = regmap_read(info->regmap, MAX172XX_STATUS, &reg_val);
++		ret = max1720x_read(info, MAX172XX_STATUS, &reg_val);
+ 		if (ret < 0) {
+ 			val->intval = 0;
+ 			return 0;
+@@ -386,47 +412,51 @@ static int max1720x_battery_get_property(struct power_supply *psy,
+ 		val->intval = !FIELD_GET(MAX172XX_STATUS_BAT_ABSENT, reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CAPACITY:
+-		ret = regmap_read(info->regmap, MAX172XX_REPSOC, &reg_val);
++		ret = max1720x_read(info, MAX172XX_REPSOC, &reg_val);
+ 		val->intval = max172xx_percent_to_ps(reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+-		ret = regmap_read(info->regmap, MAX172XX_BATT, &reg_val);
++		ret = max1720x_read(info, MAX172XX_BATT, &reg_val);
+ 		val->intval = max172xx_voltage_to_ps(reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+-		ret = regmap_read(info->regmap, MAX172XX_DESIGN_CAP, &reg_val);
++		ret = max1720x_read(info, MAX172XX_DESIGN_CAP, &reg_val);
+ 		val->intval = max172xx_capacity_to_ps(reg_val, info);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_AVG:
+-		ret = regmap_read(info->regmap, MAX172XX_REPCAP, &reg_val);
++		ret = max1720x_read(info, MAX172XX_REPCAP, &reg_val);
+ 		val->intval = max172xx_capacity_to_ps(reg_val, info);
+ 		break;
+ 	case POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG:
+-		ret = regmap_read(info->regmap, MAX172XX_TTE, &reg_val);
++		ret = max1720x_read(info, MAX172XX_TTE, &reg_val);
+ 		val->intval = max172xx_time_to_ps(reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_TIME_TO_FULL_AVG:
+-		ret = regmap_read(info->regmap, MAX172XX_TTF, &reg_val);
++		ret = max1720x_read(info, MAX172XX_TTF, &reg_val);
+ 		val->intval = max172xx_time_to_ps(reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_TEMP:
+-		ret = regmap_read(info->regmap, MAX172XX_TEMP, &reg_val);
++		ret = max1720x_read(info, MAX172XX_TEMP, &reg_val);
+ 		val->intval = max172xx_temperature_to_ps(reg_val);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CURRENT_NOW:
+-		ret = regmap_read(info->regmap, MAX172XX_CURRENT, &reg_val);
++		ret = max1720x_read(info, MAX172XX_CURRENT, &reg_val);
+ 		val->intval = max172xx_current_to_voltage(reg_val) / info->rsense;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CURRENT_AVG:
+-		ret = regmap_read(info->regmap, MAX172XX_AVG_CURRENT, &reg_val);
++		ret = max1720x_read(info, MAX172XX_AVG_CURRENT, &reg_val);
+ 		val->intval = max172xx_current_to_voltage(reg_val) / info->rsense;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_FULL:
+-		ret = regmap_read(info->regmap, MAX172XX_FULL_CAP, &reg_val);
++		ret = max1720x_read(info, MAX172XX_FULL_CAP, &reg_val);
+ 		val->intval = max172xx_capacity_to_ps(reg_val, info);
+ 		break;
+ 	case POWER_SUPPLY_PROP_MODEL_NAME:
+-		ret = regmap_read(info->regmap, MAX172XX_DEV_NAME, &reg_val);
++		if (info->max1730x) {
++			val->strval = "MAX17301";
++			break;
++		}
++		ret = max1720x_read(info, MAX172XX_DEV_NAME, &reg_val);
+ 		if (ret)
+ 			return ret;
+ 		reg_val = FIELD_GET(MAX172XX_DEV_NAME_TYPE_MASK, reg_val);
+@@ -587,6 +617,7 @@ static int max1720x_probe(struct i2c_client *client)
+ 	struct device *dev = &client->dev;
+ 	struct max1720x_device_info *info;
+ 	struct power_supply *bat;
++	unsigned int id;
+ 	int ret;
+ 
+ 	info = devm_kzalloc(dev, sizeof(*info), GFP_KERNEL);
+@@ -602,6 +633,15 @@ static int max1720x_probe(struct i2c_client *client)
+ 		return dev_err_probe(dev, PTR_ERR(info->regmap),
+ 				     "regmap initialization failed\n");
+ 
++	ret = regmap_read(info->regmap, MAX172XX_DEV_NAME, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to read gauge identity\n");
++	info->max1730x = (id >> 4) >= 0x404 && (id >> 4) <= 0x406;
++	if (device_is_compatible(dev, "maxim,max17301") && !info->max1730x)
++		return dev_err_probe(dev, -ENODEV, "MAX17301 identity mismatch\n");
++	if (info->max1730x)
++		psy_cfg.attr_grp = NULL; /* 1720x ancillary temperature map differs. */
++
+ 	ret = max1720x_probe_nvmem(client, info);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "Failed to probe nvmem\n");
+@@ -616,6 +656,7 @@ static int max1720x_probe(struct i2c_client *client)
+ 
+ static const struct of_device_id max1720x_of_match[] = {
+ 	{ .compatible = "maxim,max17201" },
++	{ .compatible = "maxim,max17301" },
+ 	{}
+ };
+ MODULE_DEVICE_TABLE(of, max1720x_of_match);
+diff --git a/drivers/power/supply/qcom_fg.c b/drivers/power/supply/qcom_fg.c
+index 1282d9519ea8d9c29a15566a23c782b4ec73dac7..89ea16587d77e07338d91b3bcb6a69f61f9d5e85 100644
+--- a/drivers/power/supply/qcom_fg.c
++++ b/drivers/power/supply/qcom_fg.c
+@@ -6,6 +6,7 @@
+ #include <linux/kernel.h>
+ #include <linux/math64.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of_address.h>
+ #include <linux/of_device.h>
+ #include <linux/of_irq.h>
+@@ -27,9 +28,6 @@
+ #define PARAM_ADDR_BATT_VOLTAGE 0x1a0
+ #define PARAM_ADDR_BATT_CURRENT 0x1a2
+ 
+-/* RRADC */
+-#define ADC_RR_BATT_TEMP_LSB 0x288
+-
+ /* MEMIF */
+ #define MEM_INTF_STS(chip) (chip->ops->memif_base + 0x10)
+ #define MEM_INTF_CFG(chip) (chip->ops->memif_base + 0x50)
+@@ -82,6 +80,7 @@ struct qcom_fg_ops {
+ };
+ 
+ struct qcom_fg_chip {
++	struct mutex gen4_dma_lock;
+ 	struct device *dev;
+ 	unsigned int base;
+ 	struct regmap *regmap;
+@@ -184,6 +183,8 @@ static int qcom_fg_masked_write(struct qcom_fg_chip *chip, u16 addr, u8 mask,
+ 	return qcom_fg_write(chip, &reg, addr, 1);
+ }
+ 
++#include "qcom_fg_gen4_temp.h"
++
+ /************************
+  * SRAM FUNCTIONS
+  * **********************/
+@@ -814,30 +815,6 @@ static int qcom_fg_gen3_get_temp_threshold(struct qcom_fg_chip *chip,
+  * BATTERY STATUS, GEN4
+  * ***********************/
+ 
+-/**
+- * @brief qcom_fg_gen4_get_temperature() - Get temperature of battery
+- *
+- * @param chip Pointer to chip
+- * @param val Pointer to store value at
+- * @return int 0 on success, negative errno on error
+- */
+-static int qcom_fg_gen4_get_temperature(struct qcom_fg_chip *chip, int *val)
+-{
+-	int temp;
+-	u8 readval[2];
+-	int ret;
+-
+-	ret = qcom_fg_read(chip, readval, ADC_RR_BATT_TEMP_LSB, 2);
+-	if (ret) {
+-		dev_err(chip->dev, "Failed to read temperature: %d", ret);
+-		return ret;
+-	}
+-
+-	temp = readval[1] << 8 | readval[0];
+-	*val = temp * 10;
+-	return 0;
+-}
+-
+ /************************
+  * BATTERY POWER SUPPLY
+  * **********************/
+@@ -1170,6 +1147,7 @@ static int qcom_fg_probe(struct platform_device *pdev)
+ 		return -ENOMEM;
+ 
+ 	chip->dev = &pdev->dev;
++	mutex_init(&chip->gen4_dma_lock);
+ 	chip->ops = of_device_get_match_data(&pdev->dev);
+ 
+ 	chip->regmap = dev_get_regmap(pdev->dev.parent, NULL);
+@@ -1221,6 +1199,12 @@ static int qcom_fg_probe(struct platform_device *pdev)
+ 		return ret;
+ 	}
+ 
++	if (of_device_is_compatible(pdev->dev.of_node, "qcom,pm8150b-fg")) {
++		ret = qcom_fg_gen4_init_dma(chip);
++		if (ret)
++			return dev_err_probe(chip->dev, ret, "Gen4 DMA setup failed\n");
++	}
++
+ 	supply_config.drv_data = chip;
+ 
+ 	chip->batt_psy = devm_power_supply_register(chip->dev, &batt_psy_desc,
+diff --git a/drivers/power/supply/qcom_fg_gen4_temp.h b/drivers/power/supply/qcom_fg_gen4_temp.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..951e87ba6552e7ee395d210ec580cb028f8d4ad8
+--- /dev/null
++++ b/drivers/power/supply/qcom_fg_gen4_temp.h
+@@ -0,0 +1,111 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* PM8150B temperature access from Google msm 82a738b32e3f715728b846f8908083286287cb06:
++ * fg-memif.c/fg-reg.h DMA protocol and qpnp-fg-gen4.c word328 decoding.
++ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
++ * The old four-byte SRAM helper requires an IRQ absent on this generation.
++ */
++#include <linux/delay.h>
++
++#define GEN4_MEM_ARB_CFG(chip) ((chip)->ops->memif_base + 0x40)
++#define GEN4_PEEK_MUX4 0x1ee
++#define GEN4_PEEK_RD 0x1ef
++/* DMA4 covers SRAM words300..405, two bytes per word, window starts +0x20. */
++#define GEN4_TEMP_DMA_ADDR (0x800 + 0x20 + (328 - 300) * 2)
++
++static int qcom_fg_gen4_init_dma(struct qcom_fg_chip *chip)
++{
++	u8 mux = 0xac;
++	int ret;
++
++	/* Partition addressing and low latency, as stock fg_dma_init(). */
++	ret = qcom_fg_masked_write(chip, MEM_IF_DMA_CTL(chip), BIT(1), BIT(1));
++	if (ret)
++		return ret;
++	ret = qcom_fg_masked_write(chip, GEN4_MEM_ARB_CFG(chip),
++				   BIT(2) | BIT(1), BIT(1));
++	if (ret)
++		return ret;
++	return qcom_fg_write(chip, &mux, GEN4_PEEK_MUX4, 1);
++}
++
++static int qcom_fg_gen4_release_dma(struct qcom_fg_chip *chip)
++{
++	int ret, release;
++
++	ret = qcom_fg_masked_write(chip, MEM_INTF_CFG(chip), BIT(7) | BIT(5), 0);
++	release = qcom_fg_masked_write(chip, GEN4_MEM_ARB_CFG(chip), BIT(0), 0);
++	if (ret || release)
++		dev_err(chip->dev, "Gen4 DMA release failed: %d/%d\n", ret, release);
++	return ret ?: release;
++}
++
++static int qcom_fg_gen4_get_temperature(struct qcom_fg_chip *chip, int *val)
++{
++	u8 data[2], status;
++	int ret, release, i;
++
++	guard(mutex)(&chip->gen4_dma_lock);
++	/* Never take over another memory transaction. */
++	ret = qcom_fg_read(chip, &status, MEM_INTF_CFG(chip), 1);
++	if (ret)
++		return ret;
++	if (status & (BIT(7) | BIT(5)))
++		return -EBUSY;
++	ret = qcom_fg_read(chip, &status, GEN4_MEM_ARB_CFG(chip), 1);
++	if (ret)
++		return ret;
++	if (status & BIT(0))
++		return -EBUSY;
++
++	/* Stock PM8150B-v1 DMA workaround, conservatively used on both revisions.
++	 * ALG_ACTIVE may need320ms during ESR pulses; stock polls35x10ms.
++	 */
++	for (i = 0; i < 35; i++) {
++		ret = qcom_fg_read(chip, &status, GEN4_PEEK_RD, 1);
++		if (ret)
++			return ret;
++		if (!(status & BIT(3)))
++			break;
++		usleep_range(10000, 10001);
++	}
++	if (i == 35)
++		return -ETIMEDOUT;
++	usleep_range(1000, 1001);
++	ret = qcom_fg_masked_write(chip, GEN4_MEM_ARB_CFG(chip), BIT(0), BIT(0));
++	if (ret)
++		goto out;
++	ret = qcom_fg_masked_write(chip, MEM_INTF_CFG(chip), BIT(7) | BIT(5), BIT(7));
++	if (ret)
++		goto out;
++	usleep_range(40, 41);
++	for (i = 0; i < 50; i++) {
++		ret = qcom_fg_read(chip, &status, MEM_INTF_STS(chip), 1);
++		if (ret)
++			goto out;
++		if (status & BIT(3))
++			break;
++		usleep_range(10000, 10001);
++	}
++	if (i == 50) {
++		ret = -ETIMEDOUT;
++		goto out;
++	}
++	usleep_range(1000, 1001);
++	ret = qcom_fg_read(chip, data, GEN4_TEMP_DMA_ADDR, sizeof(data));
++	if (ret)
++		goto out;
++	ret = qcom_fg_read(chip, &status, MEM_IF_DMA_STS(chip), 1);
++	if (!ret && (status & (BIT(1) | BIT(2))))
++		ret = -EIO;
++out:
++	release = qcom_fg_gen4_release_dma(chip);
++	if (!ret)
++		ret = release;
++	if (ret) {
++		dev_err(chip->dev, "Gen4 SRAM temperature read failed: %d\n", ret);
++		return ret;
++	}
++	/* Signed10-bit two's-complement, 0.25C/LSB -> deci degrees C. */
++	*val = sign_extend32(data[0] | (data[1] << 8), 9) * 100 / 40;
++	return 0;
++}
+diff --git a/drivers/power/supply/qcom_smbx.c b/drivers/power/supply/qcom_smbx.c
+index 2b5d20bac2907a7b07bb6ab77c3694b6014a88a1..6ada5ef6c263a85234f988e8396a5499e013ccdf 100644
+--- a/drivers/power/supply/qcom_smbx.c
++++ b/drivers/power/supply/qcom_smbx.c
+@@ -109,7 +109,7 @@ enum smb_generation {
+ #define AUTO_SRC_DETECT_BIT				BIT(3)
+ #define HVDCP_EN_BIT					BIT(2)
+ 
+-#define USBIN_LOAD_CFG					0x65
++#define USBIN_LOAD_CFG					0x365
+ #define ICL_OVERRIDE_AFTER_APSD_BIT			BIT(4)
+ 
+ #define USBIN_ICL_OPTIONS				0x366
+@@ -199,6 +199,8 @@ enum smb_generation {
+ 
+ /* pmi8998 registers represent current in increments of 1/40th of an amp */
+ #define CURRENT_SCALE_FACTOR				25000
++#define SMB5_CURRENT_SCALE_FACTOR			50000
++#define CHARGE_CURRENT_STEP(chip) ((chip)->gen == SMB5 ? SMB5_CURRENT_SCALE_FACTOR : CURRENT_SCALE_FACTOR)
+ /* clang-format on */
+ 
+ enum charger_status {
+@@ -267,6 +269,9 @@ static enum power_supply_property smb_properties[] = {
+ 	POWER_SUPPLY_PROP_HEALTH,
+ 	POWER_SUPPLY_PROP_ONLINE,
+ 	POWER_SUPPLY_PROP_USB_TYPE,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
++	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
+ };
+ 
+ static int smb_get_prop_usb_online(struct smb_chip *chip, int *val)
+@@ -343,7 +348,7 @@ static int smbx_ov_status(struct smb_chip *chip)
+ 		mask = SMB2_CHARGER_ERROR_STATUS_BAT_OV_BIT;
+ 		break;
+ 	case SMB5:
+-		reg = BATTERY_CHARGER_STATUS_7;
++		reg = BATTERY_CHARGER_STATUS_2;
+ 		mask = SMB5_CHARGER_ERROR_STATUS_BAT_OV_BIT;
+ 		break;
+ 	}
+@@ -352,7 +357,30 @@ static int smbx_ov_status(struct smb_chip *chip)
+ 	if (rc)
+ 		return rc;
+ 
+-	return !!(reg & mask);
++	return !!(val & mask);
++}
++
++/* SMB5: state0 is inhibit and state6 is pause; neither means charging. */
++static int smb_charge_state(struct smb_chip *chip, u32 stat)
++{
++	if (chip->gen == SMB5 && (stat == 0 || stat == 6))
++		return POWER_SUPPLY_STATUS_NOT_CHARGING;
++
++	switch (stat) {
++	case TRICKLE_CHARGE:
++	case PRE_CHARGE:
++	case FAST_CHARGE:
++	case FULLON_CHARGE:
++	case TAPER_CHARGE:
++		return POWER_SUPPLY_STATUS_CHARGING;
++	case DISABLE_CHARGE:
++		return POWER_SUPPLY_STATUS_NOT_CHARGING;
++	case TERMINATE_CHARGE:
++	case INHIBIT_CHARGE:
++		return POWER_SUPPLY_STATUS_FULL;
++	default:
++		return POWER_SUPPLY_STATUS_UNKNOWN;
++	}
+ }
+ 
+ static int smb_get_prop_status(struct smb_chip *chip, int *val)
+@@ -385,27 +413,8 @@ static int smb_get_prop_status(struct smb_chip *chip, int *val)
+ 		return 0;
+ 	}
+ 
+-	stat = stat & BATTERY_CHARGER_STATUS_MASK;
+-
+-	switch (stat) {
+-	case TRICKLE_CHARGE:
+-	case PRE_CHARGE:
+-	case FAST_CHARGE:
+-	case FULLON_CHARGE:
+-	case TAPER_CHARGE:
+-		*val = POWER_SUPPLY_STATUS_CHARGING;
+-		return rc;
+-	case DISABLE_CHARGE:
+-		*val = POWER_SUPPLY_STATUS_NOT_CHARGING;
+-		return rc;
+-	case TERMINATE_CHARGE:
+-	case INHIBIT_CHARGE:
+-		*val = POWER_SUPPLY_STATUS_FULL;
+-		return rc;
+-	default:
+-		*val = POWER_SUPPLY_STATUS_UNKNOWN;
+-		return rc;
+-	}
++	*val = smb_charge_state(chip, stat & BATTERY_CHARGER_STATUS_MASK);
++	return 0;
+ }
+ 
+ static inline int smb_get_current_limit(struct smb_chip *chip,
+@@ -414,7 +423,7 @@ static inline int smb_get_current_limit(struct smb_chip *chip,
+ 	int rc = regmap_read(chip->regmap, chip->base + ICL_STATUS(chip), val);
+ 
+ 	if (rc >= 0)
+-		*val *= CURRENT_SCALE_FACTOR;
++		*val *= CHARGE_CURRENT_STEP(chip);
+ 	return rc;
+ }
+ 
+@@ -427,7 +436,7 @@ static int smb_set_current_limit(struct smb_chip *chip, unsigned int val)
+ 			"Can't set current limit higher than 4800000uA");
+ 		return -EINVAL;
+ 	}
+-	val_raw = val / CURRENT_SCALE_FACTOR;
++	val_raw = val / CHARGE_CURRENT_STEP(chip);
+ 
+ 	return regmap_write(chip->regmap, chip->base + USBIN_CURRENT_LIMIT_CFG,
+ 			    val_raw);
+@@ -488,16 +497,6 @@ static void smb_status_change_work(struct work_struct *work)
+ static int smb_get_iio_chan(struct smb_chip *chip, struct iio_channel *chan,
+ 			     int *val)
+ {
+-	int rc;
+-	union power_supply_propval status;
+-
+-	rc = power_supply_get_property(chip->chg_psy, POWER_SUPPLY_PROP_STATUS,
+-				       &status);
+-	if (rc < 0 || status.intval != POWER_SUPPLY_STATUS_CHARGING) {
+-		*val = 0;
+-		return 0;
+-	}
+-
+ 	if (IS_ERR(chan)) {
+ 		dev_err(chip->dev, "Failed to chan, err = %li", PTR_ERR(chan));
+ 		return PTR_ERR(chan);
+@@ -590,14 +589,70 @@ static int smb_get_prop_health(struct smb_chip *chip, int *val)
+ 	}
+ }
+ 
++/* SMB5 encoding follows Google's pm8150b params; SMB2 retains its own scale. */
++static int smb_set_float_voltage(struct smb_chip *chip, int uv)
++{
++	int minimum = chip->gen == SMB5 ? 3600000 : 3487500;
++	int step = chip->gen == SMB5 ? 10000 : 7500;
++	int offset = chip->gen == SMB5 ? 0 : 1;
++	unsigned int raw;
++
++	if (!chip->batt_info)
++		return -EAGAIN;
++	if (uv < minimum || uv > chip->batt_info->voltage_max_design_uv ||
++	    (chip->gen == SMB5 && uv > 4790000))
++		return -EINVAL;
++	raw = (uv - minimum) / step + offset;
++	if (raw > FLOAT_VOLTAGE_SETTING_MASK)
++		return -EINVAL;
++
++	return regmap_update_bits(chip->regmap, chip->base + FLOAT_VOLTAGE_CFG,
++				  FLOAT_VOLTAGE_SETTING_MASK, raw);
++}
++
++static int smb_set_fast_charge_current(struct smb_chip *chip, int ua)
++{
++	if (!chip->batt_info)
++		return -EAGAIN;
++	if (ua < 0 || ua > chip->batt_info->constant_charge_current_max_ua ||
++	    ua / CHARGE_CURRENT_STEP(chip) > FAST_CHARGE_CURRENT_SETTING_MASK)
++		return -EINVAL;
++
++	return regmap_update_bits(chip->regmap, chip->base + FAST_CHARGE_CURRENT_CFG,
++				  FAST_CHARGE_CURRENT_SETTING_MASK,
++				  ua / CHARGE_CURRENT_STEP(chip));
++}
++
+ static int smb_get_property(struct power_supply *psy,
+ 			     enum power_supply_property psp,
+ 			     union power_supply_propval *val)
+ {
+ 	struct smb_chip *chip = power_supply_get_drvdata(psy);
+ 	int ret;
++	unsigned int raw;
+ 
+ 	switch (psp) {
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX:
++		ret = regmap_read(chip->regmap, chip->base + FLOAT_VOLTAGE_CFG, &raw);
++		if (ret)
++			return ret;
++		val->intval = chip->gen == SMB5 ? 3600000 + raw * 10000 :
++			3487500 + ((int)raw - 1) * 7500;
++		return 0;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
++		ret = regmap_read(chip->regmap, chip->base + FAST_CHARGE_CURRENT_CFG, &raw);
++		if (ret)
++			return ret;
++		val->intval = raw * CHARGE_CURRENT_STEP(chip);
++		return 0;
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		ret = regmap_read(chip->regmap, chip->base + CHARGING_ENABLE_CMD, &raw);
++		if (ret)
++			return ret;
++		val->intval = raw & CHARGING_ENABLE_CMD_BIT ?
++			POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO :
++			POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE;
++		return 0;
+ 	case POWER_SUPPLY_PROP_MANUFACTURER:
+ 		val->strval = "Qualcomm";
+ 		return 0;
+@@ -607,8 +662,11 @@ static int smb_get_property(struct power_supply *psy,
+ 	case POWER_SUPPLY_PROP_CURRENT_MAX:
+ 		return smb_get_current_limit(chip, &val->intval);
+ 	case POWER_SUPPLY_PROP_CURRENT_NOW:
+-		return smb_get_iio_chan(chip, chip->usb_in_i_chan,
+-					 &val->intval);
++		ret = smb_get_iio_chan(chip, chip->usb_in_i_chan, &val->intval);
++		/* PM8150B USB current sense is 0.2 V/A, not a current ADC. */
++		if (!ret && chip->gen == SMB5)
++			val->intval *= 5;
++		return ret;
+ 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+ 		ret = smb_get_iio_chan(chip, chip->usb_in_v_chan,
+ 					 &val->intval);
+@@ -638,6 +696,18 @@ static int smb_set_property(struct power_supply *psy,
+ 	struct smb_chip *chip = power_supply_get_drvdata(psy);
+ 
+ 	switch (psp) {
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX:
++		return smb_set_float_voltage(chip, val->intval);
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
++		return smb_set_fast_charge_current(chip, val->intval);
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		if (val->intval != POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO &&
++		    val->intval != POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE)
++			return -EINVAL;
++		return regmap_update_bits(chip->regmap, chip->base + CHARGING_ENABLE_CMD,
++					  CHARGING_ENABLE_CMD_BIT,
++					  val->intval == POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO ?
++					  CHARGING_ENABLE_CMD_BIT : 0);
+ 	case POWER_SUPPLY_PROP_STATUS:
+ 		return regmap_update_bits(chip->regmap, chip->base + USBIN_CMD_IL,
+ 					  USBIN_SUSPEND_BIT, !val->intval);
+@@ -653,6 +723,9 @@ static int smb_property_is_writable(struct power_supply *psy,
+ 				     enum power_supply_property psp)
+ {
+ 	switch (psp) {
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX:
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
+ 	case POWER_SUPPLY_PROP_STATUS:
+ 	case POWER_SUPPLY_PROP_CURRENT_MAX:
+ 		return 1;
+@@ -713,6 +786,8 @@ static irqreturn_t smb_handle_wdog_bark(int irq, void *data)
+ static const struct power_supply_desc smb_psy_desc = {
+ 	.name = "SMB2_charger",
+ 	.type = POWER_SUPPLY_TYPE_USB,
++	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
++			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE),
+ 	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_DCP) |
+@@ -726,6 +801,10 @@ static const struct power_supply_desc smb_psy_desc = {
+ 
+ /* Init sequence derived from vendor downstream driver */
+ static const struct smb_init_register smb5_init_seq[] = {
++	/* Keep charging off until both battery limits are programmed. */
++	{ .addr = CHARGING_ENABLE_CMD,
++	  .mask = CHARGING_ENABLE_CMD_BIT,
++	  .val = 0 },
+ 	{ .addr = USBIN_CMD_IL, .mask = USBIN_SUSPEND_BIT, .val = 0 },
+ 	/*
+ 	 * By default configure us as an upstream facing port
+@@ -737,7 +816,7 @@ static const struct smb_init_register smb5_init_seq[] = {
+ 	{ .addr = SMB5_TYPEC_TYPE_C_VCONN_CONTROL,
+ 	  .mask = SMB5_VCONN_EN_ORIENTATION_BIT | SMB5_VCONN_EN_SRC_BIT |
+ 		  SMB5_VCONN_EN_VALUE_BIT,
+-	  .val = SMB2_VCONN_EN_SRC_BIT },
++	  .val = SMB5_VCONN_EN_SRC_BIT },
+ 	{ .addr = SMB5_DEBUG_ACCESS_SRC_CFG,
+ 	  .mask = SMB5_EN_UNORIENTED_DEBUG_ACCESS_SRC_BIT,
+ 	  .val = SMB5_EN_UNORIENTED_DEBUG_ACCESS_SRC_BIT },
+@@ -762,10 +841,6 @@ static const struct smb_init_register smb5_init_seq[] = {
+ 	{ .addr = SMB5_CHARGE_RCHG_SOC_THRESHOLD_CFG_REG,
+ 	  .mask = SMB5_CHARGE_RCHG_SOC_THRESHOLD_CFG_MASK,
+ 	  .val = 250 },
+-	/* Enable charging */
+-	{ .addr = CHARGING_ENABLE_CMD,
+-	  .mask = CHARGING_ENABLE_CMD_BIT,
+-	  .val = CHARGING_ENABLE_CMD_BIT },
+ 	/* Enable BC1P2 auto Src detect */
+ 	{ .addr = USBIN_OPTIONS_1_CFG,
+ 	  .mask = AUTO_SRC_DETECT_BIT,
+@@ -804,7 +879,7 @@ static const struct smb_init_register smb5_init_seq[] = {
+ 	 */
+ 	{ .addr = FAST_CHARGE_CURRENT_CFG,
+ 	  .mask = FAST_CHARGE_CURRENT_SETTING_MASK,
+-	  .val = 1950000 / CURRENT_SCALE_FACTOR },
++	  .val = 500000 / SMB5_CURRENT_SCALE_FACTOR },
+ };
+ 
+ /* Init sequence derived from vendor downstream driver */
+@@ -1050,9 +1125,7 @@ static int smb_probe(struct platform_device *pdev)
+ 		return dev_err_probe(chip->dev, rc,
+ 				     "Failed to init status change work\n");
+ 
+-	rc = (chip->batt_info->voltage_max_design_uv - 3487500) / 7500 + 1;
+-	rc = regmap_update_bits(chip->regmap, chip->base + FLOAT_VOLTAGE_CFG,
+-				FLOAT_VOLTAGE_SETTING_MASK, rc);
++	rc = smb_set_float_voltage(chip, chip->batt_info->voltage_max_design_uv);
+ 	if (rc < 0)
+ 		return dev_err_probe(chip->dev, rc, "Couldn't set vbat max\n");
+ 
+@@ -1089,8 +1162,8 @@ static int smb_probe(struct platform_device *pdev)
+ 	 * would expect this to be changed dynamically based on temperature
+ 	 * reporting.
+ 	 */
+-	rc = regmap_write(chip->regmap, chip->base + FAST_CHARGE_CURRENT_CFG,
+-			  1950000 / CURRENT_SCALE_FACTOR);
++	rc = smb_set_fast_charge_current(chip, min(1950000,
++			chip->batt_info->constant_charge_current_max_ua));
+ 	if (rc < 0)
+ 		return dev_err_probe(chip->dev, rc,
+ 				     "Couldn't write fast charge current cfg");
+@@ -1101,6 +1174,16 @@ static int smb_probe(struct platform_device *pdev)
+ 		return dev_err_probe(chip->dev, rc,
+ 				     "Couldn't write fast AICL rerun time");
+ 
++	/* No USB-input suspend: only charging was held during SMB5 setup.
++	 * Hardware JEITA configuration is preserved; userspace may inhibit unsafe packs.
++	 */
++	if (chip->gen == SMB5) {
++		rc = regmap_update_bits(chip->regmap, chip->base + CHARGING_ENABLE_CMD,
++					CHARGING_ENABLE_CMD_BIT, CHARGING_ENABLE_CMD_BIT);
++		if (rc)
++			return dev_err_probe(chip->dev, rc, "Couldn't enable charging\n");
++	}
++
+ 	/* Initialise charger state */
+ 	schedule_delayed_work(&chip->status_change_work, 0);
+ 

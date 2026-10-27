@@ -1,4 +1,5 @@
 #!/bin/busybox sh
+# SPDX-License-Identifier: MIT
 # Sourced by PID 1. Phone partitions stay kernel-read-only; writes land in RAM.
 say 'preparing Omarchy on a read-only userdata lower layer'
 if grep -q google,coral /sys/firmware/devicetree/base/compatible; then

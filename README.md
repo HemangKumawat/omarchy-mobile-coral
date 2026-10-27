@@ -2,6 +2,8 @@
 
 Kernel device trees, kernel patches, userspace patches, initramfs scripts, and packaging recipes for the **Google Pixel 4 XL (`coral`, Qualcomm SM8150 / Snapdragon 855)** running mainline Linux (`6.17.0-sm8150`) + Arch Linux ARM / Omarchy Mobile (`Hyprland`), accompanying [`derekross/omarchy-mobile` PR #52](https://github.com/derekross/omarchy-mobile/pull/52).
 
+**What the phone actually runs, and which commit built each part, is in [`PROVENANCE.md`](PROVENANCE.md).** The installed kernel and DTB are proven against the patch series in [`kernel/series/`](kernel/series).
+
 This repository contains **source code, device trees, patches, and build/initramfs scripts only**—no proprietary firmware or binary blobs are included. All vendor firmware is read at runtime from the handset's factory partitions (`vendor_a`/`vendor_b`, `modem_a`/`modem_b`, `persist`) mounted strictly read-only (`blockdev --setro`).
 
 ---
@@ -10,7 +12,7 @@ This repository contains **source code, device trees, patches, and build/initram
 
 See [**`DEVICES.md`**](DEVICES.md) for the full 22-column matrix matching [omamobile.org/devices](https://omamobile.org/devices/).
 
-**Legend:** **testing** = verified on real hardware (runs on our `coral` image built from the [SM8150 kernel tree `v6.17.0-sm8150`](https://gitlab.postmarketos.org/soc/qualcomm-sm8150/linux/-/tree/v6.17.0-sm8150) + this repo) · **WIP** = bring-up in progress, some gates passed · **no** = not started or blocked · **-** = hardware does not exist on this device.
+**Legend:** **testing** = verified on real hardware (runs on our `coral` image built from [the SM8150 kernel tree](https://gitlab.postmarketos.org/soc/qualcomm-sm8150/linux) at `6963e3800a8e` + this repo; see [`PROVENANCE.md`](PROVENANCE.md)) · **WIP** = bring-up in progress, some gates passed · **no** = not started or blocked · **-** = hardware does not exist on this device.
 
 | Subsystem | Status | Working on Hardware | Not Working / Known Gaps | Key Sources |
 | --- | --- | --- | --- | --- |
@@ -23,7 +25,7 @@ See [**`DEVICES.md`**](DEVICES.md) for the full 22-column matrix matching [omamo
 | **USB net** | **testing** | ConfigFS gadget (`18d1:4ee3`): CDC NCM (`usb0` at `172.16.42.1/30`) + CDC ACM console + key-only `sshd` | — | [`initramfs/init`](initramfs/init) |
 | **Wi-Fi** | **testing** | Qualcomm `WCN3990` (`ath10k_snoc`) + `mpss` + `pd-mapper` + `rmtfs -r -P -s` + patched `tqftpserv` + factory `bdwlan.bin` (`Google_coral`); 2.4/5 GHz scan, WPA2-PSK, DHCPv4, DNS, HTTPS, and auto-reconnect | — | [`0002-coral-wifi-bt-firmware-dts.patch`](kernel/patches/0002-coral-wifi-bt-firmware-dts.patch), [`tqftpserv` patch](userspace/tqftpserv/0001-translate-serve-readonly-vendor-mbn-Pixel-MCFG-from-.patch) |
 | **Bluetooth** | **WIP** | Qualcomm `WCN3990` (`hci_qca` on `serial0-0`, `crbtfw21.tlv` + `crnv21.bin`, ROM `0x21`); `hci0` powers up and BLE/BR-EDR scan works | A2DP/HFP audio and persistent pairing across RAM-overlay reboots are still open | [`0002-coral-wifi-bt-firmware-dts.patch`](kernel/patches/0002-coral-wifi-bt-firmware-dts.patch), [`vendor-runtime.sh`](userspace/services/vendor-runtime.sh) |
-| **Battery** | **testing** | Maxim `MAX1720x`/`MAX1730x` fuel gauge + PM8150B ADC `VBAT` (`4.13–4.21 V`) + GEN4 FG SRAM word 328 thermistor temperature (`31.0 °C`) | — | [`coral-gauge1730x.patch`](kernel/patches/coral-gauge1730x.patch), [`coral-fg-temp.patch`](kernel/patches/coral-fg-temp.patch) |
+| **Battery** | **WIP** | PM8150B ADC5 `VBAT_SNS` cell voltage (`4.13–4.21 V`) + GEN4 FG SRAM word 328 thermistor temperature (`31.0 °C`), surfaced in the shell via [`battery-status.patch`](tools/battery-status.patch) | Aftermarket replacement battery installed on the test handset prior to the Omarchy Mobile port omits the OEM Maxim fuel-gauge IC (`max1720x`/`max1730x` at `1-0036` returns `-ENXIO`, which also prevented `%` reporting under stock Android); state-of-charge `%` is unavailable on this pack | [`coral-gauge1730x.patch`](kernel/patches/coral-gauge1730x.patch), [`coral-fg-temp.patch`](kernel/patches/coral-fg-temp.patch), [`battery-status.patch`](tools/battery-status.patch) |
 | **Charging** | **testing** | PM8150B SMB5 charger (`qcom_smbx.c`) patched with SMB5 step math and clamped in kernel `smb_probe()` to `FV = 0x3c` (`4.20 V`) and `FCC = 0x0a` (`500 mA`), leaving stock hardware JEITA (`0x1090 = 0xdf`) untouched | Conservative `4.20 V` / `500 mA` ceiling kept intentionally; USB-PD fast charge not enabled | [`coral-charge.patch`](kernel/patches/coral-charge.patch) |
 | **Haptics** | **testing** | Cirrus Logic `CS40L25A` (`0x43` on `i2c9`) wavetable click playback | — | [`coral-cs40l2x-port.patch`](kernel/patches/coral-cs40l2x-port.patch) |
 | **Torch** | **testing** | PM8150L flash LEDs (`led:torch_0`, `led:torch_1`) verified `0 -> 1 -> 0` with rear-camera optical proof and quick-settings tile | — | [`coral-daily-dt.patch`](kernel/patches/coral-daily-dt.patch) |
@@ -41,7 +43,7 @@ See [**`DEVICES.md`**](DEVICES.md) for the full 22-column matrix matching [omamo
 
 ## Base Upstream Trees
 
-- **Kernel tree:** [SM8150 mainline kernel tree](https://gitlab.postmarketos.org/soc/qualcomm-sm8150/linux/-/tree/v6.17.0-sm8150), tag `v6.17.0-sm8150` (commit `6963e3800a8e`).
+- **Kernel tree:** [the SM8150 kernel tree](https://gitlab.postmarketos.org/soc/qualcomm-sm8150/linux) at commit `6963e3800a8e`, three commits past the tag `v6.17.0-sm8150` (`379d8fe35c7c`), plus [`kernel/series/coral-30`](kernel/series/coral-30) for the installed `Image` and [`kernel/series/coral-fec40357`](kernel/series/coral-fec40357) for the DTB and the camera, audio and SLPI modules.
 - **`hexagonrpcd` (SLPI sensor daemon):** [`linux-msm/hexagonrpc`](https://github.com/linux-msm/hexagonrpc) at commit `da7a3742ab8d5273a281b70ee11f16fb2cb6a690`.
 - **`tqftpserv` (QMI TFTP server for MPSS MCFG):** [`linux-msm/tqftpserv`](https://github.com/linux-msm/tqftpserv) at commit `a9bde2f`.
 - **`rmtfs` (QMI remote filesystem service):** [`linux-msm/rmtfs`](https://github.com/linux-msm/rmtfs) run strictly with `-r -P -s` (read-only mode).
@@ -55,7 +57,9 @@ See [**`DEVICES.md`**](DEVICES.md) for the full 22-column matrix matching [omamo
 - [`kernel/dts/sm8150-google-coral-audio.dtsi`](kernel/dts/sm8150-google-coral-audio.dtsi) — SLIMbus (`171c0000.slim` + `171d0000.slim-ngd`), WCD9340 (`tavil`), dual CS35L36 (`0x40` bottom, `0x41` top with `cirrus,boost-ctl-millivolt = <4500>` and `cirrus,boost-peak-milliamp = <1600>`), and Knowles IA8508 (`spi11.0`) audio topology.
 - [`kernel/dts/sm8150-google-coral-cameras.dtsi`](kernel/dts/sm8150-google-coral-cameras.dtsi) — CCI0/CCI1, MAX77826 PMIC rails, CAMSS CSIPHY0/1/2/3, and sensor nodes (`imx363` rear wide, `imx481` rear tele, `imx520` front NIR, `ov7251` front IR left/right).
 
-### 2. Kernel Patches (`kernel/patches/` and `kernel/audio/`)
+### 2. Kernel Patches (`kernel/series/`, `kernel/patches/` and `kernel/audio/`)
+- **Authoritative:** [`kernel/series/`](kernel/series), patch series in apply order on `6963e3800a8e` (`git am`, then `tools/build-kernel.sh`). These are what ran on the phone.
+- **Per-topic review copies:** the files below split the same work by subsystem for reading. Where they differ from the series, the series is what ran.
 - **Base DTS & panel driver:**
   - [`0001-coral-base-dts-and-s6e3hc2-panel.patch`](kernel/patches/0001-coral-base-dts-and-s6e3hc2-panel.patch) — Initial `sm8150-google-coral.dts` and `panel-samsung-s6e3hc2.c` DSC driver.
   - [`0002-coral-wifi-bt-firmware-dts.patch`](kernel/patches/0002-coral-wifi-bt-firmware-dts.patch) — WCN3990 board calibration and Bluetooth firmware DT properties.
@@ -87,9 +91,28 @@ See [**`DEVICES.md`**](DEVICES.md) for the full 22-column matrix matching [omamo
 - [`userspace/services/`](userspace/services/) — Systemd service units and read-only vendor/sensor runtime helpers (`vendor-runtime.sh`, `sensor-runtime.sh`).
 
 ### 4. Initramfs & Packaging Tools (`initramfs/` and `tools/`)
-- [`initramfs/init`](initramfs/init) — Early PID 1 script: starts BusyBox `watchdog -T 20 -t 5 /dev/watchdog0`, configures USB ConfigFS NCM (`172.16.42.1/30`), starts the 120-second health loop that writes `1` to `/sys/bus/platform/drivers/qcom-pon/*/coral_healthy` once USB + `systemd` + `sshd` are up, and sources `omarchy-userspace.sh`.
+- [`initramfs/init`](initramfs/init) — Early PID 1 script (the installed one): starts BusyBox `watchdog -T 20 -t 5 /dev/watchdog0`, configures the USB ConfigFS gadget (`172.16.42.1/30`) and a root shell on the USB serial port, and after a 120-second lease writes `1` to `/sys/bus/platform/drivers/qcom-pon/*/coral_healthy` once `systemd` is PID 1 and `sshd` is alive. A USB host is not required since 22 October, so the phone also boots unplugged. Then it sources `omarchy-userspace.sh`.
 - [`initramfs/omarchy-userspace.sh`](initramfs/omarchy-userspace.sh) — Forces all `/dev/sd*`, `/dev/vd*`, and `/dev/mmcblk*` block devices read-only via `blockdev --setro`, locates root via `findfs LABEL=omarchy-root`, mounts `/lower` (`ro,noload`) with a `tmpfs` overlay (`upperdir=/run/overlay/upper`), verifies and bind-mounts read-only radio/vendor firmware, runs a second `blockdev --setro` pass, and transitions into Arch via `exec chroot /newroot /usr/lib/systemd/systemd --unit=graphical.target` (keeping PID 1's initramfs watchdog feeder alive).
-- [`tools/build-kernel.sh`](tools/build-kernel.sh) — Kernel and dual-DTB (`qcom,msm-id` v1 + v2) build script.
+- [`tools/build-kernel.sh`](tools/build-kernel.sh) — Applies `kernel/series/coral-30` to `6963e3800a8e`, checks the resulting tree hash, and builds `Image`, modules and the dual DTB (`qcom,msm-id` v1 + v2).
+
+The tools write under `$CORAL_WORK` (default `./work`). `tools/build-rootfs.py` reads `pin.json`, `dependencies.json`, `lock-off.patch`, `battery-status.patch`, `session-start.sh`, `phone-session.sh`, `sensor-rpc-pin.json`, `slpi.sha256`, and `device/coral/device.conf` from `tools/` (and service/audio configs from `userspace/`). `tools/build-kernel.sh <src> <out> --with-fec40357` also applies `kernel/series/coral-fec40357` and builds the byte-exact 12-entry `dtb-12` (`sha256: 3efe241aa349ff260ef0312e1b0a3a611943f71b0939261729c42e3842c90058`).
 - [`tools/pack-matched-dtb.py`](tools/pack-matched-dtb.py) — Matches 12 copies of `sm8150-google-coral.dtb` to the 12 factory `dtbo.img` board selectors (`qcom,msm-id` + `qcom,board-id`) alongside the 12-entry no-op `dtbo.img`.
 - [`tools/pack-bootimg.py`](tools/pack-bootimg.py) — Sets the ARM64 `Image` header `text_offset` at byte offset `8` to `0x80000` (`struct.pack_into('<Q', raw, 8, 0x80000)`), compresses with `lz4 -9` frame format (`0x184d2204`), verifies touch read-only symbols/DTB properties, packs the boot image v2 (`header_version=2`, `base=0x00000000`, `dtb_offset=0x01f00000`), and appends the 64 MiB AVB hash footer (`--algorithm NONE`).
 - [`tools/build-rootfs.py`](tools/build-rootfs.py) — Stages the mobile userspace overlay onto the Arch Linux ARM `omarchy-root` image.
+
+---
+
+## Licence
+
+- Scripts, tools, initramfs and userspace configuration: MIT ([`LICENSE`](LICENSE)); each file carries an SPDX line.
+- Kernel patches and series (`kernel/series/`, `kernel/patches/`, `kernel/audio/`): GPL-2.0-only, as the kernel ([`LICENSES/GPL-2.0-only.txt`](LICENSES/GPL-2.0-only.txt)). The device trees keep their own SPDX lines.
+- Patches to third-party projects (`userspace/hexagonrpc/`, `userspace/tqftpserv/`) are under those projects' licences.
+
+## Development handset, as it is (do not copy)
+
+- Our image is on slot A, and `vbmeta_a` was written with verification disabled.
+- Stock Android on slot B cannot boot with the ext4 `userdata`, so the handset has no stock slot to fall back to.
+- Recovery means Fastboot plus a factory image, which wipes the Arch root.
+- The image keeps an unauthenticated root shell on the USB serial gadget and gives root an empty password in the RAM copy of `/etc/shadow`. SSH is key-only, but anyone with a cable has root.
+
+See `device/coral/BRINGUP-M1.md` in the omarchy-mobile pull request.

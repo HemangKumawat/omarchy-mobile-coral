@@ -1,0 +1,539 @@
+From 52f2c29b0a60 Mon Sep 17 00:00:00 2001
+From: Hemang Kumawat <HemangKumawat@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 11:50:26 +0200
+Subject: [PATCH 9] Enable protected Coral audio and align microphone capture
+
+Source commit: 52f2c29b0a60 (diff against f1613a5f4fd4).
+Assisted-by: AI agents (Codex, Claude) under the author's direction
+---
+ .../boot/dts/qcom/sm8150-google-coral-audio.dtsi   | 156 +++++++++++++++++++++
+ arch/arm64/boot/dts/qcom/sm8150-google-coral.dts   |   2 +
+ drivers/spi/spidev.c                               |   2 +
+ sound/soc/codecs/cs35l36.c                         |   5 +-
+ sound/soc/qcom/qdsp6/q6afe-dai.c                   |  12 +-
+ sound/soc/qcom/qdsp6/q6afe.c                       |   3 +
+ sound/soc/qcom/qdsp6/q6afe.h                       |   3 +
+ sound/soc/qcom/qdsp6/q6routing.c                   |   6 +-
+ sound/soc/qcom/sm8150-coral.h                      | 137 ++++++++++++++++++
+ sound/soc/qcom/sm8150.c                            |  18 +++
+ 10 files changed, 339 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-google-coral-audio.dtsi b/arch/arm64/boot/dts/qcom/sm8150-google-coral-audio.dtsi
+new file mode 100644
+index 0000000000000000000000000000000000000000..bae8c1e19501c7ed973c4647dd4755b98319cdba
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral-audio.dtsi
+@@ -0,0 +1,156 @@
++// SPDX-License-Identifier: BSD-3-Clause
++// GPIOs/addresses from Coral TP1A stock DT; firmware stays on the phone.
++#include <dt-bindings/sound/qcom,q6asm.h>
++
++/ {
++	aliases {
++		spi0 = &spi4;
++		spi11 = &spi11;
++	};
++};
++
++&vreg_l9a_1p2 {
++	/* The Rust-owned SPI device cannot make a kernel regulator vote. */
++	regulator-boot-on;
++	regulator-always-on;
++};
++
++&spi11 {
++	status = "okay";
++	ia8508: dsp@0 {
++		compatible = "knowles,iaxxx-spi";
++		reg = <0>;
++		spi-max-frequency = <9600000>;
++		spi-cpha;
++		vdd-core-supply = <&vreg_l9a_1p2>;
++		reset-gpios = <&tlmm 143 GPIO_ACTIVE_HIGH>;
++		event-gpios = <&tlmm 123 GPIO_ACTIVE_HIGH>;
++		power-valid-gpios = <&tlmm 151 GPIO_ACTIVE_HIGH>;
++	};
++};
++
++&i2c15 {
++	bottom_amp: amplifier@40 {
++		compatible = "cirrus,cs35l36";
++		reg = <0x40>;
++		#sound-dai-cells = <0>;
++		sound-name-prefix = "Bottom";
++		reset-gpios = <&tlmm 148 GPIO_ACTIVE_HIGH>;
++		interrupts-extended = <&tlmm 132 IRQ_TYPE_LEVEL_LOW>;
++		VA-supply = <&vreg_s4a_1p8>;
++		VP-supply = <&vph_pwr>;
++		cirrus,boost-ind-nanohenry = <1000>;
++		cirrus,boost-ctl-millivolt = <4500>;
++		cirrus,boost-peak-milliamp = <1600>;
++		cirrus,boost-ctl-select = <1>;
++		cirrus,multi-amp-mode;
++		cirrus,temp-warn-threshold = <1>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&bottom_amp_irq>;
++	};
++	top_amp: amplifier@41 {
++		compatible = "cirrus,cs35l36";
++		reg = <0x41>;
++		#sound-dai-cells = <0>;
++		sound-name-prefix = "Top";
++		reset-gpios = <&tlmm 35 GPIO_ACTIVE_HIGH>;
++		interrupts-extended = <&tlmm 36 IRQ_TYPE_LEVEL_LOW>;
++		VA-supply = <&vreg_s4a_1p8>;
++		VP-supply = <&vph_pwr>;
++		cirrus,boost-ind-nanohenry = <1000>;
++		cirrus,boost-ctl-millivolt = <4500>;
++		cirrus,boost-peak-milliamp = <1600>;
++		cirrus,boost-ctl-select = <1>;
++		cirrus,multi-amp-mode;
++		cirrus,temp-warn-threshold = <1>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&top_amp_irq>;
++	};
++};
++
++&tlmm {
++	bottom_amp_irq: bottom-amp-irq-state {
++		pins = "gpio132";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++		input-enable;
++	};
++	top_amp_irq: top-amp-irq-state {
++		pins = "gpio36";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++		input-enable;
++	};
++	coral_tert_tdm: coral-tert-tdm-state {
++		pins = "gpio131", "gpio133", "gpio134";
++		function = "ter_mi2s";
++		drive-strength = <8>;
++		bias-disable;
++	};
++	coral_quat_tdm: coral-quat-tdm-state {
++		pins = "gpio137", "gpio138", "gpio139";
++		function = "qua_mi2s";
++		drive-strength = <6>;
++		bias-disable;
++	};
++};
++
++&q6afedai {
++	dai@38 {
++		reg = <TERTIARY_TDM_RX_0>;
++		qcom,tdm-sync-mode = <0>;
++		qcom,tdm-sync-src = <1>;
++		qcom,tdm-data-out = <0>;
++		qcom,tdm-invert-sync = <0>;
++		qcom,tdm-data-delay = <1>;
++		qcom,tdm-data-align = <0>;
++	};
++	dai@49 {
++		reg = <QUATERNARY_TDM_TX_0>;
++		qcom,tdm-sync-mode = <0>;
++		qcom,tdm-sync-src = <1>;
++		qcom,tdm-data-out = <0>;
++		qcom,tdm-invert-sync = <0>;
++		qcom,tdm-data-delay = <1>;
++		qcom,tdm-data-align = <0>;
++	};
++};
++
++&q6asmdai {
++	dai@0 { reg = <0>; };
++	dai@1 { reg = <1>; };
++};
++
++&sound {
++	compatible = "qcom,sm8150-sndcard";
++	model = "Pixel4XL";
++	clocks = <&rpmhcc RPMH_LN_BB_CLK3>;
++	clock-names = "iaxxx";
++	widgets = "Speaker", "Bottom Speaker", "Speaker", "Top Speaker";
++	pin-switches = "Bottom Speaker", "Top Speaker";
++	audio-routing = "Bottom Speaker", "Bottom SPK", "Top Speaker", "Top SPK";
++	pinctrl-names = "default";
++	pinctrl-0 = <&coral_tert_tdm &coral_quat_tdm>;
++	mm1-dai-link {
++		link-name = "MultiMedia1";
++		cpu { sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>; };
++	};
++	mm2-dai-link {
++		link-name = "MultiMedia2";
++		cpu { sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>; };
++	};
++	speaker-dai-link {
++		link-name = "Coral Speakers";
++		cpu { sound-dai = <&q6afedai TERTIARY_TDM_RX_0>; };
++		platform { sound-dai = <&q6routing>; };
++		codec { sound-dai = <&top_amp>, <&bottom_amp>; };
++	};
++	mic-dai-link {
++		link-name = "Coral Microphones";
++		cpu { sound-dai = <&q6afedai QUATERNARY_TDM_TX_0>; };
++		platform { sound-dai = <&q6routing>; };
++		/* Rust owns IA8508; the machine driver supplies the dummy codec. */
++	};
++};
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+index fd213ff4efc14f318745e5ad8293a83677d8257a..024e76544d7822ed8cc7a2d5bf24907d37ef4351 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+@@ -269,3 +269,5 @@ &spmi_bus {
+ 	/delete-property/ interrupts;
+ 	interrupts-extended = <&pdc 1 IRQ_TYPE_LEVEL_HIGH>;
+ };
++
++#include "sm8150-google-coral-audio.dtsi"
+diff --git a/drivers/spi/spidev.c b/drivers/spi/spidev.c
+index 5300c942a2a44dc9fe039d7059c136e93ac792b1..a73471973bb40fab085b36f7f1cee9fdcc614029 100644
+--- a/drivers/spi/spidev.c
++++ b/drivers/spi/spidev.c
+@@ -708,6 +708,7 @@ static const struct spi_device_id spidev_spi_ids[] = {
+ 	{ .name = /* dh */ "dhcom-board" },
+ 	{ .name = /* elgin */ "jg10309-01" },
+ 	{ .name = /* gocontroll */ "moduline-module-slot"},
++	{ .name = /* knowles */ "iaxxx-spi" },
+ 	{ .name = /* lineartechnology */ "ltc2488" },
+ 	{ .name = /* lwn */ "bk4" },
+ 	{ .name = /* lwn */ "bk4-spi" },
+@@ -741,6 +742,7 @@ static const struct of_device_id spidev_dt_ids[] = {
+ 	{ .compatible = "dh,dhcom-board", .data = &spidev_of_check },
+ 	{ .compatible = "elgin,jg10309-01", .data = &spidev_of_check },
+ 	{ .compatible = "gocontroll,moduline-module-slot", .data = &spidev_of_check},
++	{ .compatible = "knowles,iaxxx-spi", .data = &spidev_of_check },
+ 	{ .compatible = "lineartechnology,ltc2488", .data = &spidev_of_check },
+ 	{ .compatible = "lwn,bk4", .data = &spidev_of_check },
+ 	{ .compatible = "lwn,bk4-spi", .data = &spidev_of_check },
+diff --git a/sound/soc/codecs/cs35l36.c b/sound/soc/codecs/cs35l36.c
+index b60697ff7a506dccf3dba1b01faa985761bbbc42..8c8de7bc9691a693477f0f8fa7a31d1f5e49ee55 100644
+--- a/sound/soc/codecs/cs35l36.c
++++ b/sound/soc/codecs/cs35l36.c
+@@ -1257,7 +1257,8 @@ static int cs35l36_component_probe(struct snd_soc_component *component)
+ 				   1 << CS35L36_BST_CTRL_LIM_SHIFT);
+ 		regmap_update_bits(cs35l36->regmap, CS35L36_BSTCVRT_VCTRL1,
+ 				   CS35L35_BSTCVRT_CTL_MASK,
+-				   CS35L36_BST_CTRL_10V_CLAMP);
++				   min_not_zero(cs35l36->pdata.bst_vctl,
++						CS35L36_BST_CTRL_10V_CLAMP));
+ 		regmap_write(cs35l36->regmap, CS35L36_TESTKEY_CTRL,
+ 			     CS35L36_TEST_LOCK1);
+ 		regmap_write(cs35l36->regmap, CS35L36_TESTKEY_CTRL,
+@@ -1454,7 +1455,7 @@ static int cs35l36_handle_of_data(struct i2c_client *i2c_client,
+ 			return -EINVAL;
+ 		}
+ 
+-		pdata->bst_ipk = (val - 1600) / 50;
++		pdata->bst_ipk = ((val - 1600) / 50) | CS35L36_VALID_PDATA;
+ 	} else {
+ 		dev_err(&i2c_client->dev,
+ 			"Unable to find required parameter 'cirrus,boost-peak-milliamp'");
+diff --git a/sound/soc/qcom/qdsp6/q6afe-dai.c b/sound/soc/qcom/qdsp6/q6afe-dai.c
+index 0f47aadaabe171bcab42de260609b832557f74f5..02d12e327eccbad5af4466d384a97acdbff26212 100644
+--- a/sound/soc/qcom/qdsp6/q6afe-dai.c
++++ b/sound/soc/qcom/qdsp6/q6afe-dai.c
+@@ -6,6 +6,7 @@
+ #include <linux/err.h>
+ #include <linux/init.h>
+ #include <linux/module.h>
++#include <linux/of.h>
+ #include <linux/device.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+@@ -278,6 +279,9 @@ static int q6tdm_hw_params(struct snd_pcm_substream *substream,
+ 	tdm->data_align_type = dai_data->priv[dai->id].data_align;
+ 	tdm->sync_src = dai_data->priv[dai->id].sync_src;
+ 	tdm->sync_mode = dai_data->priv[dai->id].sync_mode;
++	tdm->data_out_enable = dai_data->priv[dai->id].data_out_enable;
++	tdm->invert_sync = dai_data->priv[dai->id].invert_sync;
++	tdm->data_delay = dai_data->priv[dai->id].data_delay;
+ 
+ 	return 0;
+ }
+@@ -489,6 +493,7 @@ static int q6afe_mi2s_set_sysclk(struct snd_soc_dai *dai,
+ {
+ 	struct q6afe_dai_data *dai_data = dev_get_drvdata(dai->dev);
+ 	struct q6afe_port *port = dai_data->port[dai->id];
++	int tdm_clk_attr = Q6AFE_LPASS_CLK_ATTRIBUTE_INVERT_COUPLE_NO;
+ 
+ 	switch (clk_id) {
+ 	case LPAIF_DIG_CLK:
+@@ -507,8 +512,11 @@ static int q6afe_mi2s_set_sysclk(struct snd_soc_dai *dai,
+ 					     Q6AFE_LPASS_CLK_ROOT_DEFAULT,
+ 					     freq, dir);
+ 	case Q6AFE_LPASS_CLK_ID_PRI_TDM_IBIT ... Q6AFE_LPASS_CLK_ID_QUIN_TDM_EBIT:
+-		return q6afe_port_set_sysclk(port, clk_id,
+-					     Q6AFE_LPASS_CLK_ATTRIBUTE_INVERT_COUPLE_NO,
++		/* Coral IA8508 transmits on the rising edge with a non-inverted BCLK. */
++		if (of_machine_is_compatible("google,coral") &&
++		    dai->id == QUATERNARY_TDM_TX_0)
++			tdm_clk_attr = Q6AFE_LPASS_CLK_ATTRIBUTE_COUPLE_NO;
++		return q6afe_port_set_sysclk(port, clk_id, tdm_clk_attr,
+ 					     Q6AFE_LPASS_CLK_ROOT_DEFAULT,
+ 					     freq, dir);
+ 	}
+diff --git a/sound/soc/qcom/qdsp6/q6afe.c b/sound/soc/qcom/qdsp6/q6afe.c
+index 7b59d514b432a2391bffba2c58691da72f2b361d..a835f19ed337cb2cb116d232432ba212f5268a8a 100644
+--- a/sound/soc/qcom/qdsp6/q6afe.c
++++ b/sound/soc/qcom/qdsp6/q6afe.c
+@@ -1365,6 +1365,9 @@ void q6afe_tdm_port_prepare(struct q6afe_port *port,
+ 	pcfg->tdm_cfg.data_format = cfg->data_format;
+ 	pcfg->tdm_cfg.sync_mode = cfg->sync_mode;
+ 	pcfg->tdm_cfg.sync_src = cfg->sync_src;
++	pcfg->tdm_cfg.ctrl_data_out_enable = cfg->data_out_enable;
++	pcfg->tdm_cfg.ctrl_invert_sync_pulse = cfg->invert_sync;
++	pcfg->tdm_cfg.ctrl_sync_data_delay = cfg->data_delay;
+ 	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame;
+ 
+ 	pcfg->tdm_cfg.slot_width = cfg->slot_width;
+diff --git a/sound/soc/qcom/qdsp6/q6afe.h b/sound/soc/qcom/qdsp6/q6afe.h
+index a29abe4ce436804cf79752264219e56503618e31..e41f2594c2cb06f43f9015782cd8e487e17c4207 100644
+--- a/sound/soc/qcom/qdsp6/q6afe.h
++++ b/sound/soc/qcom/qdsp6/q6afe.h
+@@ -188,6 +188,9 @@ struct q6afe_tdm_cfg {
+ 	u16	data_format;
+ 	u16	sync_mode;
+ 	u16	sync_src;
++	u16	data_out_enable;
++	u16	invert_sync;
++	u16	data_delay;
+ 	u16	nslots_per_frame;
+ 	u16	slot_width;
+ 	u16	slot_mask;
+diff --git a/sound/soc/qcom/qdsp6/q6routing.c b/sound/soc/qcom/qdsp6/q6routing.c
+index f49243daa517f2f4d42e5e30e94ac1581118fd54..3c5f6e22c4d2c04b56a98ff87fffa3f8506c9f71 100644
+--- a/sound/soc/qcom/qdsp6/q6routing.c
++++ b/sound/soc/qcom/qdsp6/q6routing.c
+@@ -1085,8 +1085,12 @@ static int routing_hw_params(struct snd_soc_component *component,
+ 	case SNDRV_PCM_FORMAT_S24_LE:
+ 			session->bits_per_sample = 24;
+ 		break;
+-	default:
++	case SNDRV_PCM_FORMAT_S32_LE:
++		session->bits_per_sample = 32;
+ 		break;
++	default:
++		mutex_unlock(&data->lock);
++		return -EINVAL;
+ 	}
+ 
+ 	mutex_unlock(&data->lock);
+diff --git a/sound/soc/qcom/sm8150-coral.h b/sound/soc/qcom/sm8150-coral.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..cecb98602f9d4e3667b066a11f8c6e481ecdfacd
+--- /dev/null
++++ b/sound/soc/qcom/sm8150-coral.h
+@@ -0,0 +1,137 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Coral: AP-clocked 48 kHz, four 32-bit DSP_A slots on TERT/QUAT. */
++#include <linux/clk.h>
++#define CORAL_TDM_BCLK 6144000
++#define CORAL_DIGITAL_MAX 608 /* -26 dB; speaker-protection DSP is absent. */
++
++static bool sm8150_is_coral(struct snd_soc_card *card)
++{
++	return of_machine_is_compatible("google,coral");
++}
++
++static bool sm8150_coral_port(struct snd_soc_card *card, int id)
++{
++	return sm8150_is_coral(card) &&
++		(id == TERTIARY_TDM_RX_0 || id == QUATERNARY_TDM_TX_0);
++}
++
++static int sm8150_coral_fixup(struct snd_soc_pcm_runtime *rtd,
++			     struct snd_pcm_hw_params *params)
++{
++	struct snd_interval *rate = hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE);
++	struct snd_interval *channels = hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
++	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
++
++	rate->min = rate->max = 48000;
++	channels->min = channels->max =
++		snd_soc_rtd_to_cpu(rtd, 0)->id == QUATERNARY_TDM_TX_0 ? 4 : 2;
++	snd_mask_none(fmt);
++	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S32_LE);
++	return 0;
++}
++
++static int sm8150_coral_hw_params(struct snd_pcm_substream *substream,
++				struct snd_pcm_hw_params *params)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct snd_soc_dai *cpu = snd_soc_rtd_to_cpu(rtd, 0), *codec;
++	unsigned int offsets[] = { 0, 4, 8, 12 };
++	bool capture = substream->stream == SNDRV_PCM_STREAM_CAPTURE;
++	int channels = capture ? 4 : 2, ret, i;
++
++	if (params_rate(params) != 48000 || params_channels(params) != channels ||
++	    params_format(params) != SNDRV_PCM_FORMAT_S32_LE)
++		return -EINVAL;
++	ret = snd_soc_dai_set_tdm_slot(cpu, capture ? 0xf : 0,
++				     capture ? 0 : 3, 4, 32);
++	if (ret < 0)
++		return ret;
++	ret = snd_soc_dai_set_channel_map(cpu, capture ? channels : 0,
++			capture ? offsets : NULL, capture ? 0 : channels,
++			capture ? NULL : offsets);
++	if (ret < 0 || capture)
++		return ret;
++	for_each_rtd_codec_dais(rtd, i, codec) {
++		ret = snd_soc_dai_set_sysclk(codec, 0, CORAL_TDM_BCLK, SND_SOC_CLOCK_IN);
++		if (ret < 0)
++			return ret;
++		ret = snd_soc_component_set_sysclk(codec->component, 0, 0,
++						   CORAL_TDM_BCLK, SND_SOC_CLOCK_IN);
++		if (ret < 0)
++			return ret;
++	}
++	return 0;
++}
++
++static int sm8150_coral_startup(struct snd_pcm_substream *substream)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct snd_soc_dai *cpu = snd_soc_rtd_to_cpu(rtd, 0), *codec;
++	int ret, i, clock = cpu->id == TERTIARY_TDM_RX_0 ?
++		Q6AFE_LPASS_CLK_ID_TER_TDM_IBIT : Q6AFE_LPASS_CLK_ID_QUAD_TDM_IBIT;
++
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		for_each_rtd_codec_dais(rtd, i, codec) {
++			ret = snd_soc_dai_set_fmt(codec, SND_SOC_DAIFMT_CBC_CFC |
++						 SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_DSP_A);
++			if (ret < 0)
++				return ret;
++		}
++	}
++	return snd_soc_dai_set_sysclk(cpu, clock, CORAL_TDM_BCLK, substream->stream);
++}
++
++static void sm8150_coral_shutdown(struct snd_pcm_substream *substream)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct snd_soc_dai *cpu = snd_soc_rtd_to_cpu(rtd, 0);
++	int ret, clock = cpu->id == TERTIARY_TDM_RX_0 ?
++		Q6AFE_LPASS_CLK_ID_TER_TDM_IBIT : Q6AFE_LPASS_CLK_ID_QUAD_TDM_IBIT;
++
++	ret = snd_soc_dai_set_sysclk(cpu, clock, 0, substream->stream);
++	if (ret < 0)
++		dev_err(rtd->dev, "Coral TDM clock stop failed: %d\n", ret);
++}
++
++static int sm8150_coral_late_probe(struct snd_soc_card *card)
++{
++	static const char * const names[] = {
++		"Top Digital PCM Volume", "Bottom Digital PCM Volume",
++		"Top Analog PCM Volume", "Bottom Analog PCM Volume",
++	};
++	struct snd_ctl_elem_value *value;
++	struct snd_kcontrol *control;
++	struct soc_mixer_control *mixer;
++	struct clk *clock;
++	int i, ret;
++
++	if (!sm8150_is_coral(card))
++		return 0;
++	clock = devm_clk_get_enabled(card->dev, "iaxxx");
++	if (IS_ERR(clock))
++		return dev_err_probe(card->dev, PTR_ERR(clock), "IA8508 reference clock\n");
++	value = devm_kzalloc(card->dev, sizeof(*value), GFP_KERNEL);
++	if (!value)
++		return -ENOMEM;
++	for (i = 0; i < ARRAY_SIZE(names); i++) {
++		control = snd_soc_card_get_kcontrol(card, names[i]);
++		if (!control)
++			return dev_err_probe(card->dev, -EINVAL, "Missing %s\n", names[i]);
++		/* Do not mutate the codec driver's static shared mixer descriptors. */
++		mixer = devm_kmemdup(card->dev, (void *)control->private_value,
++				    sizeof(*mixer), GFP_KERNEL);
++		if (!mixer)
++			return -ENOMEM;
++		control->private_value = (unsigned long)mixer;
++		value->value.integer.value[0] = i < 2 ? CORAL_DIGITAL_MAX : 0;
++		if (i < 2)
++			mixer->platform_max = CORAL_DIGITAL_MAX;
++		ret = control->put(control, value);
++		if (ret < 0)
++			return dev_err_probe(card->dev, ret, "Cannot cap %s\n", names[i]);
++		/* ALSA's platform_max=0 means unlimited, so freeze analogue at zero. */
++		if (i >= 2)
++			control->vd[0].access &= ~SNDRV_CTL_ELEM_ACCESS_WRITE;
++	}
++	return 0;
++}
+diff --git a/sound/soc/qcom/sm8150.c b/sound/soc/qcom/sm8150.c
+index 8ad61345bb738a2d43cd36d7ffd7c4c3c4a06ebf..f127515e8aaeb867498a62ef5b66ddfdf93c6249 100644
+--- a/sound/soc/qcom/sm8150.c
++++ b/sound/soc/qcom/sm8150.c
+@@ -33,6 +33,8 @@ struct sm8150_snd_data {
+ 	struct sdw_stream_runtime *sruntime[AFE_PORT_MAX];
+ };
+ 
++#include "sm8150-coral.h"
++
+ static unsigned int tdm_slot_offset[8] = {0, 4, 8, 12, 16, 20, 24, 28};
+ 
+ static const struct {
+@@ -53,6 +55,8 @@ static int sm8150_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
+ 					SNDRV_PCM_HW_PARAM_CHANNELS);
+ 	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
+ 
++	if (sm8150_coral_port(rtd->card, snd_soc_rtd_to_cpu(rtd, 0)->id))
++		return sm8150_coral_fixup(rtd, params);
+ 	rate->min = rate->max = 48000;
+ 	channels->min = channels->max = 2;
+ 	snd_mask_none(fmt);
+@@ -199,6 +203,8 @@ static int sm8150_snd_hw_params(struct snd_pcm_substream *substream,
+ 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+ 	int ret = 0;
+ 
++	if (sm8150_coral_port(rtd->card, cpu_dai->id))
++		return sm8150_coral_hw_params(substream, params);
+ 	switch (cpu_dai->id) {
+ 	case QUATERNARY_TDM_RX_0:
+ 	case QUATERNARY_TDM_TX_0:
+@@ -305,6 +311,8 @@ static int sm8150_snd_startup(struct snd_pcm_substream *substream)
+ 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+ 	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+ 
++	if (sm8150_coral_port(card, cpu_dai->id))
++		return sm8150_coral_startup(substream);
+ 	switch (cpu_dai->id) {
+ 	case QUATERNARY_TDM_RX_0:
+ 		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_DSP_A;
+@@ -332,6 +340,10 @@ static void sm8150_snd_shutdown(struct snd_pcm_substream *substream)
+ 	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(card);
+ 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+ 
++	if (sm8150_coral_port(card, cpu_dai->id)) {
++		sm8150_coral_shutdown(substream);
++		return;
++	}
+ 	switch (cpu_dai->id) {
+ 	case QUATERNARY_TDM_RX_0:
+ 	case QUATERNARY_TDM_TX_0:
+@@ -419,6 +431,11 @@ static void sm8150_add_be_ops(struct snd_soc_card *card)
+ 	int i;
+ 
+ 	for_each_card_prelinks(card, i, link) {
++		if (sm8150_is_coral(card) && link->id == QUATERNARY_TDM_TX_0) {
++			link->no_pcm = 1;
++			link->dynamic = 0;
++			link->capture_only = 1;
++		}
+ 		if (link->no_pcm == 1) {
+ 			link->be_hw_params_fixup = sm8150_be_hw_params_fixup;
+ 			link->ops = &sm8150_be_ops;
+@@ -443,6 +460,7 @@ static int sm8150_platform_probe(struct platform_device *pdev)
+ 	if (!data)
+ 		return -ENOMEM;
+ 
++	card->late_probe = sm8150_coral_late_probe;
+ 	card->driver_name = DRIVER_NAME;
+ 	card->dev = dev;
+ 	card->owner = THIS_MODULE;

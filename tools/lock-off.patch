@@ -1,0 +1,48 @@
+--- a/usr/share/omarchy/shell/plugins/lock/Service.qml
++++ b/usr/share/omarchy/shell/plugins/lock/Service.qml
+@@ -19,0 +20 @@
++  property bool lockDisabled: true
+@@ -73 +74 @@
+-    if (!lockRequested || sessionLock.locked || sessionLock.secure) return
++    if (lockDisabled || !lockRequested || sessionLock.locked || sessionLock.secure) return
+@@ -137,0 +139 @@
++    if (lockDisabled) return false
+@@ -496,0 +499,17 @@
++  // Coral development mode uses Omarchy's existing file toggle convention.
++  FileView {
++    path: root.stateHome + "/omarchy/toggles/lock-off"
++    watchChanges: true
++    printErrors: false
++    onLoaded: root.lockDisabled = true
++    onLoadFailed: root.lockDisabled = false
++    onFileChanged: reload()
++  }
++
++  onLockDisabledChanged: {
++    if (lockDisabled) {
++      previewVisible = false
++      finishUnlock()
++    }
++  }
++
+@@ -537,0 +557 @@
++      if (root.lockDisabled) return "disabled"
+@@ -556,0 +577,2 @@
++        disabled: root.lockDisabled,
++        previewVisible: root.previewVisible,
+@@ -571,0 +594 @@
++      if (root.lockDisabled) return "disabled"
+--- a/usr/bin/omarchy-system-lock
++++ b/usr/bin/omarchy-system-lock
+@@ -6,0 +7,3 @@
++
++# Coral development mode: preserve the lock implementation, skip all requests.
++omarchy-toggle-enabled lock-off && exit 0
+--- a/usr/bin/omamobile-keys
++++ b/usr/bin/omamobile-keys
+@@ -99 +99,4 @@
+-  if screensaver_up; then
++  if omarchy-toggle-enabled lock-off; then
++    if screen_off; then omarchy-brightness-display on
++    else omarchy-brightness-display off; fi
++  elif screensaver_up; then

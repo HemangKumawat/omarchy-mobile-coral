@@ -1,0 +1,18 @@
+{
+  "source": "https://github.com/derekross/omarchy-mobile",
+  "commit": "1155a7c352edf6313fb4e2ff02f054c9cb1902b6",
+  "previous_commit": "d12b7432b26b77d68e809534f8be0260fa90317c",
+  "widgets_source": "https://github.com/SimonSchubert/omarchy-widgets",
+  "widgets_commit": "b63886b75e02ccef1a8a11baeef2d6eff7a374af",
+  "reason": "Refresh adds touch home screens and OWL widgets absent from the proved October 13 payload.",
+  "delivery": "Exact-image initramfs payload copied into the RAM overlay before graphical.target; existing upstream freedreno and Hyprland retained.",
+  "packages": {
+    "omamobile-shell": "Stage pinned shell and runtime tools; retain upstream licenses including the GPL squeekboard layout.",
+    "omamobile-omarchy": "Apply and reverse-verify the pinned patches offline against the actual read-only coral lower; ship only changed files.",
+    "omamobile-owl-widgets": "Stage the hash-checked pinned widget store for home screens.",
+    "omamobile-firstboot": "Build staging artifact only. Existing account, key-only USB SSH, getty autologin and RAM setup replace the upstream user/firewall/storage provisioning.",
+    "omaphone": "Inventory only: depends on omatel-agent>=0.2.1, GTK4, libadwaita and sqlite. Coral telephony is unproved and this app is outside the desktop payload.",
+    "omamobile-apps": "Omit the cheetah camera, NFC and GNSS app metapackage: those devices have no coral proof.",
+    "mesa/hyprland": "Use the lower rootfs packages. Never stage the cheetah Mali/Panthor variants. No vulkan-freedreno."
+  }
+}

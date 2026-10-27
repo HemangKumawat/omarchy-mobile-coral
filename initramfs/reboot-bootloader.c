@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include <linux/reboot.h>
 #include <stdio.h>
 #include <sys/syscall.h>

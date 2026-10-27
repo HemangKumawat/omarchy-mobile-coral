@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Match each mainline DTB to the factory board selector, avoiding broken no-op DTO.
 
 ABL only merges an overlay when its hardware match weight exceeds the base DTB's.
@@ -6,6 +7,7 @@ The h2 driver trees are preserved while matching each factory board selector.
 Kernel, ramdisk and recovery policy remain identical to boot-safe.
 """
 import hashlib
+import os
 from pathlib import Path
 import re
 import shlex
@@ -14,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 
-WORK = Path('/var/tmp/pixel4xl/ramtest/rescue-safe')
+WORK = Path(os.environ.get('CORAL_WORK', 'work')) / 'ramtest/rescue-safe'
 OVERLAY_SHA = 'b2fd720ac0b48260ac6024023c64f9afbadb80bd6c01799eb2f0caffa0b69722'
 
 
@@ -40,7 +42,7 @@ def main():
     existing = sys.argv[1:] == ['--verify-existing']
     if sys.argv[1:] and not existing:
         raise ValueError('Only --verify-existing is supported')
-    run('python3', '-I', WORK / 'pixel4xl_rescue_verify.py')
+    run('python3', '-I', Path(__file__).with_name('pixel4xl_rescue_verify.py'))
     image = WORK / 'boot-matched.img'
     if not existing and image.exists():
         raise FileExistsError(f'Refusing to replace {image}')

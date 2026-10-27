@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Stage the pinned phone shell; never run upstream's phone installer."""
 import argparse
 import hashlib
@@ -11,12 +12,23 @@ import shutil
 import subprocess
 import tarfile
 
-_apps_spec = importlib.util.spec_from_file_location('phone_apps', Path(__file__).with_name('phone_apps.py'))
-phone_apps = importlib.util.module_from_spec(_apps_spec)
-_apps_spec.loader.exec_module(phone_apps)
+# The owner's private app launchers (phone_apps.py) are not published; without them the rootfs
+# is the same image minus those launchers.
+_apps_path = Path(__file__).with_name('phone_apps.py')
+phone_apps = None
+if _apps_path.exists():
+    _apps_spec = importlib.util.spec_from_file_location('phone_apps', _apps_path)
+    phone_apps = importlib.util.module_from_spec(_apps_spec)
+    _apps_spec.loader.exec_module(phone_apps)
 
-BASE = Path('/var/tmp/pixel4xl/omamobile')
+BASE = Path(os.environ.get('CORAL_WORK', 'work')) / 'omamobile'
 HERE = Path(__file__).resolve().parent
+SERVICES = HERE.parent / 'userspace/services'
+
+
+def repo_file(name):
+    candidate = HERE / name
+    return candidate if candidate.exists() else SERVICES / name
 LOWER = BASE / 'lower'
 SOURCE = BASE / 'upstream'
 
@@ -210,9 +222,9 @@ def main():
     (output / 'usr/bin/coral-mobile-start').chmod(0o755)
     for source, name in (('vendor-runtime.sh', 'coral-vendor'),
                          ('phone-session.sh', 'coral-phone-session')):
-        copy(HERE / source, output / 'usr/local/bin' / name)
+        copy(repo_file(source), output / 'usr/local/bin' / name)
         (output / 'usr/local/bin' / name).chmod(0o755)
-    copy(HERE / 'coral-phone.service', output / 'etc/systemd/system/coral-phone.service')
+    copy(repo_file('coral-phone.service'), output / 'etc/systemd/system/coral-phone.service')
     if inhibit:
         unit = output / 'etc/systemd/system/coral-phone.service'
         unit.write_text(unit.read_text().replace('[Service]\n',
@@ -223,13 +235,13 @@ def main():
     # Direct, guarded Rust s2idle owns standby. The generic shell's unguarded
     # suspend menu remains disabled until the separate hardware wake proof.
     for name in ('wake.conf', 'charge.conf', 'haptic.conf'):
-        if (HERE / name).exists():
+        if repo_file(name).exists():
             config = output / 'etc/coral-phone' / name
-            copy(HERE / name, config)
+            copy(repo_file(name), config)
             config.chmod(0o644)
             os.chown(config, 0, 0)
     if args.audio:
-        audio = HERE.parent / 'audio'
+        audio = HERE.parent / 'userspace/audio' if (HERE.parent / 'userspace/audio').exists() else HERE.parent / 'audio'
         config = output / 'etc/coral-phone/ia8508.conf'
         copy(audio / 'ia8508.conf', config)
         config.chmod(0o644)
@@ -256,12 +268,12 @@ def main():
         copy(rpc, output / 'usr/local/bin/hexagonrpcd')
         copy(BASE.parent / 'sensors-rpc/reviewed-build/COPYING.hexagonrpc',
              output / 'usr/share/licenses/hexagonrpc/COPYING')
-        copy(HERE / 'sensor-runtime.sh', output / 'usr/local/bin/coral-sensors')
+        copy(repo_file('sensor-runtime.sh'), output / 'usr/local/bin/coral-sensors')
         for name in ('hexagonrpcd', 'coral-sensors'):
             (output / 'usr/local/bin' / name).chmod(0o755)
         for name in ('slpi.sha256', 'sensors.conf'):
-            copy(HERE / name, output / 'etc/coral-phone' / name)
-        copy(HERE / 'coral-hexagonrpcd.service',
+            copy(repo_file(name), output / 'etc/coral-phone' / name)
+        copy(repo_file('coral-hexagonrpcd.service'),
              output / 'etc/systemd/system/coral-hexagonrpcd.service')
         target = output / 'etc/systemd/system/multi-user.target.wants'
         target.mkdir(parents=True, exist_ok=True)
@@ -329,7 +341,8 @@ def main():
     if args.phone_apps:
         if not args.camera_runtime:
             raise ValueError('Phone apps require their reviewed complete dynamic runtime')
-        phone_apps.stage(HERE, output)
+        if phone_apps:
+            phone_apps.stage(HERE, output)
     for path in sorted(output.rglob('*')):
         if path.is_symlink():
             manifest['files'][str(path.relative_to(output))] = {'link': os.readlink(path)}

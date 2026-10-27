@@ -1,0 +1,26 @@
+{
+  "source": "https://github.com/linux-msm/hexagonrpc",
+  "commit": "da7a3742ab8d5273a281b70ee11f16fb2cb6a690",
+  "license": "GPL-3.0-or-later",
+  "archive_sha256": "651ab53dcf92a2766ba6ec42cac2ccdbd67382da5211b14c5fa33b618153c435",
+  "license_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+  "patches": [
+    {
+      "path": "userspace/hexagonrpc/hexagonrpc-ram-registry.patch",
+      "sha256": "28722b5afad9f6bf46eb22cf0f4be23f124d3f9e605bb70905ff2309150e9a94"
+    },
+    {
+      "path": "userspace/hexagonrpc/hexagonrpc-listener-buffers.patch",
+      "sha256": "cea74dcc7c2584d6bf335f6d235c07ca9bfbcc629f374a337fc17afc672a5cb4"
+    },
+    {
+      "path": "userspace/hexagonrpc/hexagonrpc-registry-rename.patch",
+      "sha256": "057fc7e7f24b7b7558c9fe3aec115d6ca3d5ecec1f89d74773ea698f15633d4c"
+    },
+    {
+      "path": "userspace/hexagonrpc/hexagonrpc-listener-rejection.patch",
+      "sha256": "6e15e5c1ea278f97f331f099fbfdba784242127ce7cb741a33076f61db21e9a9"
+    }
+  ],
+  "binary_sha256": "8b8716cb19fcf406f9e1ce382ce887acc9492ddb613f84ceb37e392cbbc4f108"
+}

@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Ordered git-am patch series on top of public commit 6963e3800a8e
+# ("power: supply: idtp9418: remove unused variable", 3 commits ahead of
+# tag v6.17.0-sm8150 at 379d8fe35c7c in https://gitlab.postmarketos.org/soc/qualcomm-sm8150/linux).
+#
+# Patches 0001..0007 (kernel/series/coral-30/) produce git tree 21eb1828b205f86d87333e77179e03a8f5b930b3
+# (which built Kernel #30 Image). Patches 0001..0005 built Kernel #3 (472bb39eac2a).
+# Patches 0008..0011 (kernel/series/coral-fec40357/) on top of 0001..0007 produce git tree
+# 6d4115553ae5a9aec7b9e4ae23f77b2e4c4d7c4e (which built the 12-entry DTB and SLPI/audio/camera modules;
+# 0001..0009 built Kernel #25 at 52f2c29b0a60 and 0001..0010 built Kernel #27 at d3dd05299ff8).
+../series/coral-30/0001-arm64-dts-qcom-sm8150-add-initial-Google-Pixel-4-XL-.patch
+../series/coral-30/0002-arm64-dts-coral-touch-coords-disable-touch-fw-auto-u.patch
+../series/coral-30/0003-drm-panel-add-Samsung-S6E3HC2-Pixel-4-XL-coral-DSC-c.patch
+../series/coral-30/0004-arm64-dts-coral-wire-s6e3hc2-panel-re-enable-MDSS.patch
+../series/coral-30/0005-Preserve-verified-coral-display-touch-and-recovery-b.patch
+../series/coral-30/0006-coral-add-calibrated-display-wake-touch-and-bounded-.patch
+../series/coral-30/0007-coral-finish-display-telemetry-and-wake-diagnostics.patch
+../series/coral-fec40357/0008-Enable-Coral-SLPI-and-preserve-FastRPC-pool-ownershi.patch
+../series/coral-fec40357/0009-Enable-protected-Coral-audio-and-align-microphone-ca.patch
+../series/coral-fec40357/0010-media-bring-up-five-Coral-cameras-and-concurrent-rea.patch
+../series/coral-fec40357/0011-drm-msm-dsi-retain-powered-link-clocks-and-serialize.patch

@@ -1,0 +1,327 @@
+From 472bb39eac2a Mon Sep 17 00:00:00 2001
+From: Hemang Kumawat <HemangKumawat@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 02:08:58 +0200
+Subject: [PATCH 5] Preserve verified coral display touch and recovery baseline
+
+Source commit: 472bb39eac2a (diff against 675e0bec2e2d).
+Assisted-by: AI agents (Codex, Claude) under the author's direction
+---
+ arch/arm64/boot/dts/qcom/sm8150-google-coral.dts   | 35 ++++++++++
+ drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c      | 16 +++++
+ drivers/input/touchscreen/fts_touch/fts.c          | 26 +++++---
+ .../input/touchscreen/fts_touch/fts_lib/ftsCore.c  | 12 ++++
+ .../input/touchscreen/fts_touch/fts_lib/ftsFlash.c | 22 +------
+ drivers/power/reset/qcom-pon.c                     | 77 ++++++++++++++++++++++
+ 6 files changed, 160 insertions(+), 28 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+index 69c045cc88ab0cb640280e4ae017e8450940ec8f..dbc360756889db6df8ed8d26e7078815ccf6ddf2 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+@@ -89,3 +89,38 @@ &remoteproc_slpi {
+ 	firmware-name = "qcom/sm8150/google/coral/slpi.mdt";
+ };
+ 
++
++/*
++ * Radios (coral-radio). Stock vendor.img ships exactly one WCN3990 BT pair
++ * (crbtfw21.tlv + crnv21.bin, i.e. ROM 0x21) and bdwlan-coral.bin (26328 B =
++ * WCN3990_BOARD_DATA_SZ). linux-firmware has no Google_coral board entry, so
++ * without these the chip falls back to the generic "qmi-board-id=ff" data.
++ */
++&wifi {
++	/* ath10k snoc: firmware-name is a subdir -> ath10k/WCN3990/hw1.0/coral/board-2.bin */
++	firmware-name = "coral";
++	qcom,calibration-variant = "Google_coral";
++};
++
++&bluetooth {
++	/* btqca: "qca/" + name; vendor NVM and its matching rampatch */
++	firmware-name = "coral/crnv21.bin", "coral/crbtfw21.tlv";
++};
++
++/*
++ * No &ipa (mobile data): sm8150 is IPA v4.1 and drivers/net/ipa has no v4.1
++ * data or compatible, and sm8150.dtsi has no ipa node. Porting that is driver
++ * work (ref OnePlus 7 Pro / raphael downstream ports), not a dts line.
++ */
++
++/* Factory dtbo.10 dsi_panel_pwr_supply_floral: vci min=max=3000000 uV. */
++&vreg_l4c_1p8 {
++	regulator-min-microvolt = <3000000>;
++	regulator-max-microvolt = <3000000>;
++};
++
++/* Unused SPI buses; touchscreen remains on spi0. */
++&spi6 { status = "disabled"; };
++&spi8 { status = "disabled"; };
++&spi10 { status = "disabled"; };
++&spi11 { status = "disabled"; };
+diff --git a/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
+index 856e78466a68908dc552d65001f7c90f1f5cee3e..6ada1a6a63114212c0a37edab8d880a91d84b46a 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
++++ b/drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c
+@@ -134,6 +134,21 @@ static int s6e3hc2_prepare(struct drm_panel *panel)
+ 	return 0;
+ }
+ 
++static int s6e3hc2_enable(struct drm_panel *panel)
++{
++	struct s6e3hc2 *ctx = to_s6e3hc2(panel);
++	u8 mode = 0;
++	int ret;
++
++	ret = mipi_dsi_dcs_get_power_mode(ctx->dsi, &mode);
++	if (ret < 0) {
++		dev_err(panel->dev, "DCS power mode read failed: %d\n", ret);
++		return ret;
++	}
++	dev_info(panel->dev, "coral DCS power mode: 0x%02x\n", mode);
++	return 0;
++}
++
+ static int s6e3hc2_unprepare(struct drm_panel *panel)
+ {
+ 	struct s6e3hc2 *ctx = to_s6e3hc2(panel);
+@@ -173,6 +188,7 @@ static int s6e3hc2_get_modes(struct drm_panel *panel,
+ 
+ static const struct drm_panel_funcs s6e3hc2_panel_funcs = {
+ 	.prepare = s6e3hc2_prepare,
++	.enable = s6e3hc2_enable,
+ 	.unprepare = s6e3hc2_unprepare,
+ 	.get_modes = s6e3hc2_get_modes,
+ };
+diff --git a/drivers/input/touchscreen/fts_touch/fts.c b/drivers/input/touchscreen/fts_touch/fts.c
+index 6a9e29b017818a74fe8183c57122da0d8bd7fd4f..92010d2f33799f381fd227777bd088d23aaa6d7f 100644
+--- a/drivers/input/touchscreen/fts_touch/fts.c
++++ b/drivers/input/touchscreen/fts_touch/fts.c
+@@ -2721,13 +2721,10 @@ static DEVICE_ATTR_RW(default_mf);
+ 
+ /*  /sys/devices/soc.0/f9928000.i2c/i2c-6/6-0049 */
+ static struct attribute *fts_attr_group[] = {
+-	 &dev_attr_infoblock_getdata.attr,
+-	&dev_attr_fwupdate.attr,
+ 	&dev_attr_appid.attr,
+ 	&dev_attr_mode_active.attr,
+ 	&dev_attr_fw_file_test.attr,
+ 	&dev_attr_status.attr,
+-	&dev_attr_stm_fts_cmd.attr,
+ #ifdef CONFIG_TOUCHSCREEN_HEATMAP
+ 	&dev_attr_heatmap_mode.attr,
+ #endif
+@@ -2757,7 +2754,6 @@ static struct attribute *fts_attr_group[] = {
+ 	&dev_attr_gesture_mask.attr,
+ 	&dev_attr_gesture_coordinates.attr,
+ #endif
+-	&dev_attr_autotune.attr,
+ 	&dev_attr_touchsim.attr,
+ 	&dev_attr_default_mf.attr,
+ 	NULL,
+@@ -4183,6 +4179,17 @@ static int fts_fw_update(struct fts_ts_info *info)
+ 	// 	goto out;
+ 	// }
+ 
++	/* No CRC recovery, CX write or calibration when firmware is read-only.
++	 * A reset timeout can leave zeroed metadata; never infer permission to
++	 * initialize flash from those values. Sensing only uses volatile state.
++	 */
++	if (!info->board->auto_fw_update) {
++		pr_info("coral fts flash-write guard: cfgAfeVer=%02X cxAfeVer=%02X mpFlag=%02X; sensing only\n",
++			systemInfo.u8_cfgAfeVer, systemInfo.u8_cxAfeVer,
++			systemInfo.u8_mpFlag);
++		return fts_init_sensing(info);
++	}
++
+ 	pr_info("Fw Auto Update is starting...\n");
+ 
+ 	/* Check CRC status */
+@@ -4346,6 +4353,11 @@ static int fts_chip_initialization(struct fts_ts_info *info, int init_type)
+ 	int initretrycnt = 0;
+ 	const char *limits_file = info->board->limits_name;
+ 
++	if (!info->board->auto_fw_update) {
++		pr_err("coral fts: calibration flash writes forbidden\n");
++		return ERROR_OP_NOT_ALLOW;
++	}
++
+ 	/* initialization error, retry initialization */
+ 	for (retry = 0; retry < RETRY_INIT_BOOT; retry++) {
+ #ifndef COMPUTE_INIT_METHOD
+@@ -5638,9 +5650,7 @@ static int fts_probe(struct spi_device *client)
+ 		goto ProbeErrorExit_7;
+ 	}
+ 
+-	error = fts_proc_init();
+-	if (error < OK)
+-		pr_err("Error: can not create /proc file!\n");
++	/* Raw maintenance commands must never be exposed on coral. */
+ 
+ 	if (info->fwu_workqueue)
+ 		queue_delayed_work(info->fwu_workqueue, &info->fwu_work,
+@@ -5727,7 +5737,7 @@ static void fts_remove(struct spi_device *client)
+ 	tbn_cleanup(info->tbn);
+ #endif
+ 
+-	fts_proc_remove();
++	/* No /proc/fts was registered. */
+ 
+ 	/* sysfs stuff */
+ 	sysfs_remove_group(&client->dev.kobj, &info->attrs);
+diff --git a/drivers/input/touchscreen/fts_touch/fts_lib/ftsCore.c b/drivers/input/touchscreen/fts_touch/fts_lib/ftsCore.c
+index 513cc20060d92409cc2ebc0c3b4cc4602f7c458b..ccad7271ef1c248f3359fb6c30cd7a3924db327a 100644
+--- a/drivers/input/touchscreen/fts_touch/fts_lib/ftsCore.c
++++ b/drivers/input/touchscreen/fts_touch/fts_lib/ftsCore.c
+@@ -468,6 +468,18 @@ int writeSysCmd(u8 sys_cmd, u8 *sett, int size)
+ 	int buff_len = (2 + 1) * size + 1;
+ 	int index = 0;
+ 
++	/* This kernel never persists configuration or calibration to the IC. */
++	if (size < 0 || (size && !sett))
++		return ERROR_OP_NOT_ALLOW;
++	if (sys_cmd == SYS_CMD_SAVE_FLASH ||
++	    (sys_cmd == SYS_CMD_SPECIAL && size > 0 &&
++	     (sett[0] == SPECIAL_PANEL_INIT ||
++	      sett[0] == SPECIAL_FULL_PANEL_INIT ||
++	      sett[0] == SPECIAL_WRITE_HOST_MEM_TO_FLASH))) {
++		pr_err("coral fts: persistent system command forbidden\n");
++		return ERROR_OP_NOT_ALLOW;
++	}
++
+ 	cmd = kmalloc(cmd_len * sizeof(u8), GFP_KERNEL);
+ 	buff = kmalloc(buff_len * sizeof(char), GFP_KERNEL);
+ 
+diff --git a/drivers/input/touchscreen/fts_touch/fts_lib/ftsFlash.c b/drivers/input/touchscreen/fts_touch/fts_lib/ftsFlash.c
+index 7902bd9cbbeca03a641df17900000d5e3d4659a8..ed78fff8c4bbe2d7b7a33e3727e3e90525bda05f 100644
+--- a/drivers/input/touchscreen/fts_touch/fts_lib/ftsFlash.c
++++ b/drivers/input/touchscreen/fts_touch/fts_lib/ftsFlash.c
+@@ -528,26 +528,8 @@ int flash_enable_uvlo_autopowerdown(void)
+   */
+ int flash_unlock(void)
+ {
+-	u8 cmd[6] = { FTS_CMD_HW_REG_W,	  0x20,	  0x00,	  0x00,
+-		      FLASH_UNLOCK_CODE0, FLASH_UNLOCK_CODE1 };
+-
+-	u8 cmd1[6] = { FTS_CMD_HW_REG_W, 0x20, 0x00, 0x00,
+-		       FLASH_UNLOCK_CODE2, FLASH_UNLOCK_CODE3 };
+-
+-	pr_info("Command unlock ...\n");
+-	if (fts_write(cmd, ARRAY_SIZE(cmd)) < OK) {
+-		pr_err("flash_unlock: ERROR %08X\n", ERROR_BUS_W);
+-		return ERROR_BUS_W;
+-	}
+-
+-	if (fts_write(cmd1, ARRAY_SIZE(cmd1)) < OK) {
+-		pr_err("Command unlock: ERROR %08X\n", ERROR_BUS_W);
+-		return ERROR_BUS_W;
+-	}
+-
+-	pr_info("Unlock flash DONE!\n");
+-
+-	return OK;
++	pr_err("coral fts: flash unlock forbidden\n");
++	return ERROR_OP_NOT_ALLOW;
+ }
+ 
+ /**
+diff --git a/drivers/power/reset/qcom-pon.c b/drivers/power/reset/qcom-pon.c
+index 7e108982a582e8243c5c806bd4a793646b87189f..0da3c2f574261588361bf3d2a16ed12660c62d48 100644
+--- a/drivers/power/reset/qcom-pon.c
++++ b/drivers/power/reset/qcom-pon.c
+@@ -25,6 +25,9 @@ struct qcom_pon {
+ 	u32 baseaddr;
+ 	struct reboot_mode_driver reboot_mode;
+ 	long reason_shift;
++	bool coral_guard;
++	bool coral_healthy;
++	struct notifier_block coral_reboot;
+ };
+ 
+ static int qcom_pon_reboot_mode_write(struct reboot_mode_driver *reboot,
+@@ -44,6 +47,63 @@ static int qcom_pon_reboot_mode_write(struct reboot_mode_driver *reboot,
+ 	return ret;
+ }
+ 
++/* Keep Fastboot latched across panic/emergency_restart and hardware watchdog
++ * resets. Only an orderly, healthy userspace reboot may clear it. This PMIC
++ * spare register is the same reason consumed by the existing bootloader helper.
++ */
++static int coral_reboot_notify(struct notifier_block *nb,
++                              unsigned long event, void *cmd)
++{
++	struct qcom_pon *pon = container_of(nb, struct qcom_pon, coral_reboot);
++	bool normal = !cmd || !strcmp(cmd, "normal");
++	unsigned int reason = 2;
++
++	if (READ_ONCE(pon->coral_healthy) && normal &&
++	    (event == SYS_RESTART || event == SYS_POWER_OFF))
++		reason = 0;
++	return qcom_pon_reboot_mode_write(&pon->reboot_mode, reason) < 0 ?
++		NOTIFY_BAD : NOTIFY_DONE;
++}
++
++static ssize_t coral_healthy_show(struct device *dev,
++                                 struct device_attribute *attr, char *buf)
++{
++	struct qcom_pon *pon = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "%u\n", READ_ONCE(pon->coral_healthy));
++}
++
++static ssize_t coral_healthy_store(struct device *dev,
++                                  struct device_attribute *attr,
++                                  const char *buf, size_t count)
++{
++	struct qcom_pon *pon = dev_get_drvdata(dev);
++	bool healthy;
++	int ret = kstrtobool(buf, &healthy);
++
++	if (ret)
++		return ret;
++	WRITE_ONCE(pon->coral_healthy, healthy);
++	return count;
++}
++static DEVICE_ATTR_RW(coral_healthy);
++static ssize_t coral_recovery_reason_show(struct device *dev,
++                                         struct device_attribute *attr, char *buf)
++{
++	struct qcom_pon *pon = dev_get_drvdata(dev);
++	unsigned int value;
++	int ret = regmap_read(pon->regmap, pon->baseaddr + PON_SOFT_RB_SPARE, &value);
++
++	if (ret)
++		return ret;
++	return sysfs_emit(buf, "%u\n", (value & GENMASK(7, pon->reason_shift)) >> pon->reason_shift);
++}
++static DEVICE_ATTR_RO(coral_recovery_reason);
++static struct attribute *coral_attrs[] = {
++	&dev_attr_coral_healthy.attr, &dev_attr_coral_recovery_reason.attr, NULL
++};
++static const struct attribute_group coral_group = { .attrs = coral_attrs };
++
+ static int qcom_pon_probe(struct platform_device *pdev)
+ {
+ 	struct qcom_pon *pon;
+@@ -81,6 +141,23 @@ static int qcom_pon_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	platform_set_drvdata(pdev, pon);
++	pon->coral_guard = of_machine_is_compatible("google,coral");
++	if (pon->coral_guard) {
++		if (reason_shift != GEN2_REASON_SHIFT)
++			return dev_err_probe(&pdev->dev, -EINVAL, "unexpected coral PON layout\n");
++		error = qcom_pon_reboot_mode_write(&pon->reboot_mode, 2);
++		if (error)
++			return dev_err_probe(&pdev->dev, error, "cannot arm Fastboot recovery\n");
++		pon->coral_reboot.notifier_call = coral_reboot_notify;
++		pon->coral_reboot.priority = 128;
++		error = devm_register_reboot_notifier(&pdev->dev, &pon->coral_reboot);
++		if (error)
++			return error;
++		error = devm_device_add_group(&pdev->dev, &coral_group);
++		if (error)
++			return error;
++		dev_info(&pdev->dev, "coral Fastboot recovery armed before userspace\n");
++	}
+ 
+ 	return devm_of_platform_populate(&pdev->dev);
+ }

@@ -1,0 +1,87 @@
+From 86f51f76752a Mon Sep 17 00:00:00 2001
+From: Hemang Kumawat <HemangKumawat@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 22:24:37 +0200
+Subject: [PATCH 1] arm64: dts: qcom: sm8150: add initial Google Pixel 4 XL (coral)
+
+Source commit: 86f51f76752a (diff against 6963e3800a8e).
+Assisted-by: AI agents (Codex, Claude) under the author's direction
+---
+ arch/arm64/boot/dts/qcom/Makefile                |  1 +
+ arch/arm64/boot/dts/qcom/sm8150-google-coral.dts | 57 ++++++++++++++++++++++++
+ 2 files changed, 58 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
+index 01bc586700daa186f2add5d1b0d0787fa06b2f06..5292b3f2912e765c3eb1ba09ce45102b6d7bada1 100644
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -270,6 +270,7 @@ dtb-$(CONFIG_ARCH_QCOM)	+= sm7225-fairphone-fp4.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm7325-nothing-spacewar.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8150-hdk.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8150-google-flame.dtb
++dtb-$(CONFIG_ARCH_QCOM)	+= sm8150-google-coral.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8150-microsoft-surface-duo.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8150-mtp.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8150-sony-xperia-kumano-bahamut.dtb
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f259bf0dc92bdc78aa172b92820f4e16d7e801d8
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+@@ -0,0 +1,57 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Google Pixel 4 XL (coral). Derived from sm8150-google-flame.dts.
++ *
++ * Stock coral-tp1a.221005.002.b2 evidence:
++ *  - dtbo.img "Google Inc. MSM sm8150 Coral" overlay: board-id <0x51e05 0>
++ *    (flame: 0x61e05); regulators, touch (st,fts) and panel reset GPIO 67
++ *    are identical to flame. Differences: panel, battery profile, two
++ *    microchip,pac1934 power monitors (not described here), audio card name.
++ *  - bootloader: 0x9C400000, 0x02400000, "Display Reserved" (same as flame).
++ *  - panel: "s6e3hc2 amoled 6.2 cmd mode panel", 1440x3040, DSC. No mainline
++ *    driver yet, so the DSI/MDSS path is disabled and we stay on simplefb.
++ */
++
++#include "sm8150-google-flame.dts"
++
++/ {
++	model = "Google Pixel 4 XL";
++	compatible = "google,coral", "qcom,sm8150";
++	qcom,board-id = <0x00051e05 0x00000000>;
++
++};
++
++/*
++ * Bootloader-lit panel: the panel/DSI node is gone, so simplefb must hold the
++ * panel + DSI rails and the MDSS GDSC, else late cleanup cuts them and the
++ * screen goes dark (rails taken from flame panel@0, mdss_dsi0, mdss_dsi0_phy).
++ */
++&framebuffer0 {
++	width = <1440>;
++	height = <3040>;
++	stride = <(1440 * 4)>;
++	vddio-supply = <&vreg_l14a_1p8>;
++	vci-supply = <&vreg_l4c_1p8>;
++	vdda-supply = <&vreg_l3c_1p2>;
++	vdds-supply = <&vreg_l5a_0p88>;
++	power-domains = <&dispcc MDSS_GDSC>;
++};
++
++/* Pixel 4 XL: 3700 mAh rated; 3.85 V nominal kept from flame */
++&battery {
++	charge-full-design-microamp-hours = <3700000>;
++	energy-full-design-microwatt-hours = <14245000>;
++};
++
++/* ponytail: flame panel (lg,nt37280) is wrong for coral; drop DRM until an s6e3hc2 driver exists */
++&mdss_dsi0 {
++	/delete-node/ panel@0;
++};
++
++&mdss_dsi0_out {
++	/delete-property/ remote-endpoint;
++};
++
++&mdss {
++	status = "disabled";
++};

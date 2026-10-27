@@ -1,0 +1,62 @@
+[
+  {
+    "name": "gobject-introspection-runtime",
+    "file": "gobject-introspection-runtime-1.86.0-2-aarch64.pkg.tar.xz",
+    "sha256": "fe0d6a936340bf8b6752d96f198f130ad0fdbc39521dd71257346f297a0287ae",
+    "repo": "extra",
+    "bytes": 30644,
+    "installed_bytes": 154460
+  },
+  {
+    "name": "inotify-tools",
+    "file": "inotify-tools-4.26.270-1-aarch64.pkg.tar.xz",
+    "sha256": "9df157eeb79c0bd43951881e82cefb4f12ff62d51250357fe2badf570bb1aef2",
+    "repo": "extra",
+    "bytes": 343364,
+    "installed_bytes": 1544131
+  },
+  {
+    "name": "libgirepository",
+    "file": "libgirepository-1.86.0-2-aarch64.pkg.tar.xz",
+    "sha256": "c9c9715f03a1b4bbbd9e03c203275f4571a4c8b6bd1e5307eafc02ebf1789fed",
+    "repo": "extra",
+    "bytes": 178880,
+    "installed_bytes": 1711104
+  },
+  {
+    "name": "pipewire-alsa",
+    "file": "pipewire-alsa-1:1.6.9-1-aarch64.pkg.tar.xz",
+    "sha256": "370ba27f77e7b5409f4e481279f0c1f1a90ed332b2addf2b3eb9a08c7d40a04d",
+    "repo": "extra",
+    "bytes": 5172,
+    "installed_bytes": 1218
+  },
+  {
+    "name": "python-gobject",
+    "file": "python-gobject-3.58.1-1-aarch64.pkg.tar.xz",
+    "sha256": "49b8991906522d676aafc7588c6a1760dfe5b2316e3c4168ac8a62ea01bf7d1f",
+    "repo": "extra",
+    "bytes": 300132,
+    "installed_bytes": 1713562
+  },
+  {
+    "name": "wf-recorder",
+    "file": "wf-recorder-0.6.0-2-aarch64.pkg.tar.xz",
+    "sha256": "29040b0144bcb297e0ad0ad46ba11360327ee89e6251b8849795f31b252a3c4b",
+    "repo": "extra",
+    "bytes": 46312,
+    "installed_bytes": 145715
+  },
+  {
+    "name": "libbsd",
+    "file": "libbsd-0.12.2-2-aarch64.pkg.tar.xz",
+    "sha256": "3d47f2e64ab9c2dfbdc5791ad7db237ed3c9708ad80718c26f4b850cf2b69238",
+    "source": "Existing October 13 touch-shell ALARM package"
+  },
+  {
+    "name": "libmd",
+    "file": "libmd-1.3.0-1-aarch64.pkg.tar.xz",
+    "sha256": "e2f1090d6e3401da5655ac553398bd47338c4c6e39ac0ed684a9b4f33707354b",
+    "source": "Existing October 13 touch-shell ALARM package"
+  }
+]

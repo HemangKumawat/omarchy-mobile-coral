@@ -1,0 +1,56 @@
+From 675e0bec2e2d Mon Sep 17 00:00:00 2001
+From: Hemang Kumawat <HemangKumawat@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 04:43:25 +0200
+Subject: [PATCH 4] arm64: dts: coral: wire s6e3hc2 panel, re-enable MDSS
+
+Reuse flame panel@0 (reset GPIO 67, vddio/vci, TE pinctrl, 4 lanes; same as
+stock coral) and change only the compatible. simplefb stays for handover.
+
+Source commit: 675e0bec2e2d (diff against 20203b38f8cb).
+Assisted-by: AI agents (Codex, Claude) under the author's direction
+---
+ arch/arm64/boot/dts/qcom/sm8150-google-coral.dts | 23 +++++++++++------------
+ 1 file changed, 11 insertions(+), 12 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+index 735eca800dea7ea70843ac325b179d58ebe8da3c..69c045cc88ab0cb640280e4ae017e8450940ec8f 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-google-coral.dts
+@@ -8,8 +8,8 @@
+  *    are identical to flame. Differences: panel, battery profile, two
+  *    microchip,pac1934 power monitors (not described here), audio card name.
+  *  - bootloader: 0x9C400000, 0x02400000, "Display Reserved" (same as flame).
+- *  - panel: "s6e3hc2 amoled 6.2 cmd mode panel", 1440x3040, DSC. No mainline
+- *    driver yet, so the DSI/MDSS path is disabled and we stay on simplefb.
++ *  - panel: "s6e3hc2 amoled 6.2 cmd mode panel", 1440x3040, DSC.
++ *    Driver: drivers/gpu/drm/panel/panel-samsung-s6e3hc2.c (branch coral-panel).
+  */
+ 
+ #include "sm8150-google-flame.dts"
+@@ -43,17 +43,16 @@ &battery {
+ 	energy-full-design-microwatt-hours = <14245000>;
+ };
+ 
+-/* ponytail: flame panel (lg,nt37280) is wrong for coral; drop DRM until an s6e3hc2 driver exists */
++/*
++ * Coral panel: Samsung s6e3hc2 (stock qcom,mdss_dsi_s6e3hc2). Same reset GPIO
++ * 67, vddio/vci rails, TE pin and 4 lanes as flame's panel@0, so only the
++ * compatible changes. DSC (slice 720x40, 8 bpc, 8 bpp, 2 slices) lives in
++ * the driver, as mainline panel drivers own their DSC config.
++ */
+ &mdss_dsi0 {
+-	/delete-node/ panel@0;
+-};
+-
+-&mdss_dsi0_out {
+-	/delete-property/ remote-endpoint;
+-};
+-
+-&mdss {
+-	status = "disabled";
++	panel@0 {
++		compatible = "samsung,s6e3hc2";
++	};
+ };
+ 
+ /*

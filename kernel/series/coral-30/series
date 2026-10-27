@@ -1,0 +1,7 @@
+0001-arm64-dts-qcom-sm8150-add-initial-Google-Pixel-4-XL-.patch
+0002-arm64-dts-coral-touch-coords-disable-touch-fw-auto-u.patch
+0003-drm-panel-add-Samsung-S6E3HC2-Pixel-4-XL-coral-DSC-c.patch
+0004-arm64-dts-coral-wire-s6e3hc2-panel-re-enable-MDSS.patch
+0005-Preserve-verified-coral-display-touch-and-recovery-b.patch
+0006-coral-add-calibrated-display-wake-touch-and-bounded-.patch
+0007-coral-finish-display-telemetry-and-wake-diagnostics.patch

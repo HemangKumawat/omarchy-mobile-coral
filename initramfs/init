@@ -1,4 +1,5 @@
 #!/bin/busybox sh
+# SPDX-License-Identifier: MIT
 # RAM-only rescue: never mount or write a phone partition.
 set -eu
 /bin/busybox --install -s /bin
@@ -6,7 +7,7 @@ mkdir -p /proc /sys /dev /run /tmp
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
-mount -t tmpfs tmpfs /run
+mount -t tmpfs -o mode=0755 tmpfs /run
 say() { echo "[coral-safe] $*"; echo "[coral-safe] $*" > /dev/kmsg; }
 fail() {
     trap - EXIT HUP INT TERM
@@ -15,10 +16,30 @@ fail() {
     exit 1
 }
 trap 'fail "init failed"' EXIT HUP INT TERM
-# timeout-policy: PROBE (12 probe intervals allow driver enumeration and host access)
+# timeout-policy: PROBE (12 probe intervals allow driver enumeration and userspace start)
+# 2026-10-22 standalone profile: health no longer needs a USB host, so an unplugged phone stays up
+# and marks itself healthy; an orderly reboot then returns to Omarchy instead of Fastboot.
 T_PROBE=10
 USB_TIMEOUT=$((T_PROBE * 12))
-( sleep "$USB_TIMEOUT"; fail "rescue lease expired" ) &
+( trap - EXIT HUP INT TERM
+sleep "$USB_TIMEOUT"
+while true; do
+    # timeout-policy: PROBE (bounded USB/userspace recovery after resume)
+    health_wait=0
+    until [ "$(cat /proc/1/comm)" = systemd ] &&
+       [ -s /run/sshd.pid ] &&
+       [ "$(cat "/proc/$(cat /run/sshd.pid)/comm")" = sshd ]; do
+        [ "$health_wait" -lt "$T_PROBE" ] || fail "userspace health deadline failed"
+        [ "$health_wait" != 0 ] || say "userspace health pending; retrying for $T_PROBE seconds"
+        sleep 1
+        health_wait=$((health_wait + 1))
+    done
+    for health in /sys/bus/platform/drivers/qcom-pon/*/coral_healthy; do
+        [ ! -e "$health" ] || echo 1 > "$health"
+    done
+    touch /run/coral-usb-confirmed
+    sleep "$T_PROBE"
+done ) &
 say "kernel $(uname -r); rescue lease ${USB_TIMEOUT}s"
 if [ -c /dev/watchdog0 ]; then
     watchdog -T "$((T_PROBE * 2))" -t "$((T_PROBE / 2))" /dev/watchdog0
@@ -50,6 +71,12 @@ echo "$UDC" > "$G/UDC"
 ip addr add 172.16.42.1/30 dev usb0
 ip link set usb0 up
 say "USB ACM + ECM bound to $UDC; no partitions mounted"
+( trap - EXIT HUP INT TERM
+while true; do
+    setsid sh -c 'exec sh +i </dev/ttyGS0 >/dev/ttyGS0 2>&1' || say 'serial not ready'
+    sleep 1
+done ) &
+. /bin/omarchy-userspace
 while true; do
     setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1' || say "serial shell disconnected"
     sleep 1
